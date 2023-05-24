@@ -1,28 +1,27 @@
 import functools
 import itertools
 import pathlib
+from pathlib import Path
 import tempfile
 
+from absl import app, flags, logging
 import chex
 import colorama
 import distrax
 import flax
+from flax.core import frozen_dict
 import flax.linen as nn
+from flax.training import checkpoints, train_state
 import jax
 import jax.numpy as jnp
+from ml_collections import config_flags
 import numpy as np
 import optax
+from torch.utils.data import DataLoader, Dataset
+from transformers import GPT2TokenizerFast
 import wandb
 
-from absl import app
-from absl import flags
-from absl import logging
-from flax.core import frozen_dict
-from flax.training import train_state
-from flax.training import checkpoints
-from ml_collections import config_flags
-from torch.utils.data import Dataset, DataLoader
-from transformers import GPT2TokenizerFast
+from dataset import get_train_val_datasets
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -305,14 +304,17 @@ def train(config):
     rng = jax.random.PRNGKey(config.seed)
     workdir = FLAGS.workdir
     if workdir is None:
-        workdir = tempfile.mkdtemp(prefix='gpt-')
+        workdir = tempfile.mkdtemp()
+
+    workdir = Path(workdir)
+    workdir.mkdir()
     logging.info(f'workdir: {workdir}')
+
     if config.wandb:
-        wandb.init(project='flax-gpt', config=config)
+        wandb.init(project='splice-transformer', config=config)
 
     # setup data pipeline
-    text_data = open(config.data_file).read()
-    train_dataset = CharDataset(text_data, config.block_size)
+    train_dataset, val_dataset = get_train_val_datasets(config.data_file)
     train_dataloader = DataLoader(
         train_dataset,
         collate_fn=numpy_collate,
