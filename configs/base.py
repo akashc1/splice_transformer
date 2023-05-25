@@ -19,7 +19,7 @@ def get_config():
     config.beta2 = 0.95
     config.weight_decay = 0.1
     config.grad_norm_clip = 1.0
-    config.batch_size = 64
+    config.batch_size = 12 * 8
     config.epochs = 10
     config.train_steps = 250_000
 
@@ -42,7 +42,7 @@ def get_config():
 
     # logging
     config.wandb = False
-    config.logging_interval = 50
+    config.logging_interval = 10
     config.eval_interval = 500
     config.ckpt_interval = 1000
 

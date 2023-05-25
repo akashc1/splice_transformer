@@ -4,6 +4,15 @@ import h5py
 import numpy as np
 from torch.utils.data import Dataset
 
+from constants import MAX_CONTEXT_LENGTH
+
+
+def clip_data(x, y, context_length):
+    clip = (MAX_CONTEXT_LENGTH - context_length) // 2
+    if clip != 0:
+        x = x[clip:-clip]
+    return x, y
+
 
 class H5SpliceDataset(Dataset):
     """
@@ -12,9 +21,10 @@ class H5SpliceDataset(Dataset):
 
     Uses a pointer to the h5 file and a subset of indices to include.
     """
-    def __init__(self, h5_path, indices: Union[list, np.ndarray]):
+    def __init__(self, h5_path, indices: Union[list, np.ndarray], context_length: int):
         self.h5 = h5py.File(h5_path, 'r')
         self.indices = indices
+        self.context_length = context_length
 
         chunk_sizes = [self.h5[f'X{i}'].shape[0] for i in indices]
         self.cum_chunk_sizes = np.cumsum(chunk_sizes)
@@ -40,11 +50,12 @@ class H5SpliceDataset(Dataset):
 
         X = self.h5[f'X{abs_idx}'][rel_idx]
         Y = self.h5[f'Y{abs_idx}'][0, rel_idx]  # Dataset generation code does this, idk why
+        X, Y = clip_data(X, Y, self.context_length)
 
         return {'x': X, 'y': Y}
 
 
-def get_train_val_datasets(h5_path, val_proportion=0.9):
+def get_train_val_datasets(h5_path, context_length, val_proportion=0.9):
     with h5py.File(h5_path, 'r') as f:
         num_chunks = len(f.keys()) // 2
 
@@ -53,4 +64,7 @@ def get_train_val_datasets(h5_path, val_proportion=0.9):
     tr_idx = all_idx[:int(val_proportion * num_chunks)]
     val_idx = all_idx[int(val_proportion * num_chunks):]
 
-    return H5SpliceDataset(h5_path, tr_idx), H5SpliceDataset(h5_path, val_idx)
+    return (
+        H5SpliceDataset(h5_path, tr_idx, context_length),
+        H5SpliceDataset(h5_path, val_idx, context_length),
+    )

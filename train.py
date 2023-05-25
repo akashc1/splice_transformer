@@ -15,12 +15,14 @@ from flax.training import checkpoints, train_state
 import jax
 import jax.numpy as jnp
 from ml_collections import config_flags
+from more_itertools import one
 import numpy as np
 import optax
 from torch.utils.data import DataLoader, Dataset
 from transformers import GPT2TokenizerFast
 import wandb
 
+from constants import MAX_CONTEXT_LENGTH, SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
 from models import get_conv_model
 
@@ -36,6 +38,15 @@ config_flags.DEFINE_config_file(
     'File path to the training hyperparameter configuration.',
     lock_config=True,
 )
+
+
+class TrainStateWithBN(train_state.TrainState):
+    """
+    In jax batch statistics are handled separately, so need to create new state type
+    which also tracks the batch stats.
+    """
+    batch_stats: frozen_dict.FrozenDict
+
 
 # use GPT initializations
 Dense = functools.partial(
@@ -208,19 +219,22 @@ def create_weight_decay_param_mask(p):
     return p
 
 
-def train_step(state, batch, dropout_rng):
-    x = batch['x']
-    label = batch['y']
+def train_step(state, inp, label, dropout_rng):
 
     def loss_fn(params):
-        logits = state.apply({'params': params}, x)
+        logits, updates = state.apply_fn(
+            {'params': params, 'batch_stats': state.batch_stats},
+            inp,
+            mutable=['batch_stats'],
+        )
         chex.assert_equal_shape([logits, label])
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=label))
-        return loss, logits
+        return loss, (logits, updates)
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(state.params)
+    (loss, (logits, updates)), grads = grad_fn(state.params)
     state = state.apply_gradients(grads=grads)
+    state = state.replace(batch_stats=updates['batch_stats'])
     return state, (loss, logits)
 
 
@@ -295,6 +309,12 @@ def sample(state, prompt, steps, config, rng, temperature=1.0, top_k=None, top_p
 def train(config):
     rng = jax.random.PRNGKey(config.seed)
 
+    world_size = jax.device_count()
+    assert (
+        config.batch_size % world_size == 0
+    ), f"{config.batch_size} must be divisible by {world_size=}"
+    batch_size_per_device = config.batch_size // world_size
+
     workdir = FLAGS.workdir
     if workdir is None:
         workdir = Path(tempfile.mkdtemp())
@@ -307,7 +327,7 @@ def train(config):
         wandb.init(project='splice-transformer', config=config)
 
     # setup data pipeline
-    train_dataset, val_dataset = get_train_val_datasets(config.data_file)
+    train_dataset, val_dataset = get_train_val_datasets(config.data_file, config.context_length)
     train_dataloader = DataLoader(
         train_dataset,
         collate_fn=numpy_collate,
@@ -317,7 +337,6 @@ def train(config):
         batch_size=config.batch_size,
         num_workers=config.num_workers,
     )
-    data_iter = itertools.cycle(train_dataloader)
     examples_seen = 0
 
     # setup model and optimizer
@@ -334,8 +353,9 @@ def train(config):
     # )
 
     model = get_conv_model(config.context_length)
-    fake_sequence = jnp.ones([1, 15000, 4], dtype=jnp.int32)
-    params = model.init(init_rng, fake_sequence)['params']
+    fake_sequence = jnp.ones([1, SEQUENCE_LENGTH + config.context_length, 4], dtype=jnp.int32)
+    variables = model.init(init_rng, fake_sequence)
+    params, batch_stats = variables['params'], variables['batch_stats']
     learning_rate_fn = create_learning_rate_fn(config, len(train_dataset) // config.batch_size)
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_norm_clip),
@@ -347,59 +367,78 @@ def train(config):
             mask=create_weight_decay_param_mask,
         ),
     )
-    state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+    state = TrainStateWithBN.create(
+        apply_fn=model.apply,
+        params=params,
+        tx=tx,
+        batch_stats=batch_stats,
+    )
     ckpt_dir = pathlib.Path(workdir) / 'checkpoints'
-    state = checkpoints.restore_checkpoint(ckpt_dir, state)
+    # state = checkpoints.restore_checkpoint(ckpt_dir, state)
 
     # print model
     rng, tabulate_rng = jax.random.split(rng)
     tabulate_fn = nn.tabulate(model, tabulate_rng)
     logging.info(tabulate_fn(fake_sequence))
 
+    # parallelize everything across devices
+    state = flax.jax_utils.replicate(state)
+    shape_prefix = (world_size, batch_size_per_device)
     p_train_step = jax.pmap(train_step, axis_name='batch')
+    rng = jax.random.split(rng, num=world_size)
 
-    while state.step < config.train_steps:
-        batch = next(data_iter)
-        rng, dropout_rng = jax.random.split(rng)
-        state, (loss, _) = p_train_step(state, batch, dropout_rng)
+    step = 0
 
-        examples_seen += len(batch[list(batch.keys())[0]])
-        epoch_frac = examples_seen / len(train_dataset)
+    for _ in range(config.epochs):
+        for batch in train_dataloader:
+            # create device axis which is used to map examples across devices
+            inp, label = batch['x'], batch['y']
+            inp = inp.reshape(shape_prefix + inp.shape[1:])
+            label = label.reshape(shape_prefix + label.shape[1:])
 
-        if state.step % config.logging_interval == 0:
-            lr = learning_rate_fn(state.step)
-            logging.info(
-                f'step {state.step} | epoch {epoch_frac:.2f} | lr {lr:.4f} | '
-                f'loss {loss.item():.4f}'
-            )
-            if config.wandb:
-                wandb.log(
-                    {
-                        'train': {
-                            'lr': lr,
-                            'loss': loss.item(),
-                            'epoch': epoch_frac,
-                            'examples': examples_seen,
-                        }
-                    },
-                    step=int(state.step),
+            # rng, dropout_rng = jax.random.split(rng)
+            state, (loss, _) = p_train_step(state, inp, label, rng)
+
+            examples_seen += np.prod(shape_prefix)
+            epoch_frac = examples_seen / len(train_dataset)
+            step += 1
+            loss = loss.mean()
+
+            if step % config.logging_interval == 0:
+                lr = learning_rate_fn(step)
+                logging.info(
+                    f'step {step} | epoch {epoch_frac:.2f} | lr {lr:.4f} | '
+                    f'loss {loss:.4f}'
                 )
 
-        # if state.step % config.eval_interval == 0:
-        #     rng, sample_rng = jax.random.split(rng)
-        #     seq = sample(
-        #         state,
-        #         jnp.array(train_dataset.encode("O God! O God!"))[None, :],
-        #         2000,
-        #         model_config,
-        #         sample_rng,
-        #     )
-        #     print(train_dataset.decode(np.array(seq[0])))
+                if config.wandb:
+                    wandb.log(
+                        {
+                            'train': {
+                                'lr': lr,
+                                'loss': loss,
+                                'epoch': epoch_frac,
+                                'examples': examples_seen,
+                            }
+                        },
+                        step=step,
+                    )
 
-        if state.step % config.ckpt_interval == 0:
-            checkpoints.save_checkpoint(
-                ckpt_dir, state, int(state.step), keep=float('inf')
-            )
+            # if state.step % config.eval_interval == 0:
+            #     rng, sample_rng = jax.random.split(rng)
+            #     seq = sample(
+            #         state,
+            #         jnp.array(train_dataset.encode("O God! O God!"))[None, :],
+            #         2000,
+            #         model_config,
+            #         sample_rng,
+            #     )
+            #     print(train_dataset.decode(np.array(seq[0])))
+
+            if step % config.ckpt_interval == 0:
+                checkpoints.save_checkpoint(
+                    ckpt_dir, state, step, keep=float('inf')
+                )
 
     return state
 
