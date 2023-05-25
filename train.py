@@ -164,24 +164,25 @@ def numpy_collate(batch):
         return np.array(batch)
 
 
-def create_learning_rate_fn(config):
-    warmup_fn = optax.linear_schedule(
-        init_value=0.0,
-        end_value=config.learning_rate,
-        transition_steps=config.lr_warmup_steps,
-    )
+def create_learning_rate_fn(config, examples_per_epoch):
     if config.lr_cosine_decay:
+        raise ValueError("Cosine decay schedule not supported!")
         decay_steps = config.train_steps - config.lr_warmup_steps
         opt_fn = optax.cosine_decay_schedule(
             init_value=config.learning_rate, decay_steps=decay_steps
         )
+    elif config.lr_exp_decay:
+        opt_fn = optax.exponential_decay(
+            config.learning_rate,
+            examples_per_epoch,
+            config.lr_decay_rate,
+            transition_begin=(config.lr_decay_begin_epochs - 1) * examples_per_epoch,
+            staircase=True,
+        )
     else:
         opt_fn = optax.constant_schedule(config.learning_rate)
 
-    learning_rate_fn = optax.join_schedules(
-        schedules=[warmup_fn, opt_fn], boundaries=[config.lr_warmup_steps]
-    )
-    return learning_rate_fn
+    return opt_fn
 
 
 def create_weight_decay_param_mask(p):

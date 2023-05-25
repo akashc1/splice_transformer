@@ -8,9 +8,12 @@ def get_config():
     config.seed = 42
 
     # optimizer
-    config.learning_rate = 5e-4
+    config.learning_rate = 0.001
     config.lr_warmup_steps = 3_000
-    config.lr_cosine_decay = True
+    config.lr_cosine_decay = False
+    config.lr_exp_decay = True
+    config.lr_decay_begin_epochs = 6
+    config.lr_decay_rate = 0.5
 
     config.beta1 = 0.9
     config.beta2 = 0.95

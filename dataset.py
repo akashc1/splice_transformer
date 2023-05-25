@@ -19,6 +19,11 @@ class H5SpliceDataset(Dataset):
         chunk_sizes = [self.h5[f'X{i}'].shape[0] for i in range(indices)]
         self.cum_chunk_sizes = np.cumsum(chunk_sizes)
 
+        print(
+            f"Initiated {self.__class__} using {len(indices)} chunks from {h5_path} "
+            f"({len(self)} examples)"
+        )
+
     def __len__(self):
         return self.cum_chunk_sizes[-1]
 
