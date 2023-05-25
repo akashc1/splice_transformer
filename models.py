@@ -1,7 +1,7 @@
 import numpy as np
 from more_itertools import zip_equal
 import jax
-from typing import Union
+from typing import Union, Tuple
 from flax import linen as nn
 
 
@@ -44,10 +44,10 @@ class ResidualUnit(nn.Module):
 
     def setup(self):
         self.net = nn.Sequential([
-            nn.BatchNorm(),
+            nn.BatchNorm(use_running_average=True),
             nn.relu,
             nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation),
-            nn.BatchNorm(),
+            nn.BatchNorm(use_running_average=True),
             nn.relu,
             nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation),
             nn.relu,
@@ -74,7 +74,7 @@ class DilatedConvSplicePredictor(nn.Module):
         skip = nn.Conv(self.dim, (1,), name='init_skip')(x)
 
         for i, (w, d) in enumerate(zip_equal(self.kernel_sizes, self.dilations)):
-            conv = ResidualUnit(self.dim, w, d, name=f'residual{i}')(conv)
+            conv = ResidualUnit(self.dim, w, (d,), name=f'residual{i}')(conv)
 
             if (i + 1) % 4 == 0 or i == len(self.kernel_sizes) - 1:
                 dense = nn.Conv(self.dim, (1,), name=f'dense{i // 4}')(conv)

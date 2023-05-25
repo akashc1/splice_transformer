@@ -16,7 +16,7 @@ class H5SpliceDataset(Dataset):
         self.h5 = h5py.File(h5_path, 'r')
         self.indices = indices
 
-        chunk_sizes = [self.h5[f'X{i}'].shape[0] for i in range(indices)]
+        chunk_sizes = [self.h5[f'X{i}'].shape[0] for i in indices]
         self.cum_chunk_sizes = np.cumsum(chunk_sizes)
 
         print(
@@ -29,14 +29,17 @@ class H5SpliceDataset(Dataset):
 
     def __getitem__(self, idx):
         # Relative indices: index of chunk to sample, index within chunk
-        chunk_idx = np.searchsorted(self.cum_chunk_sizes, idx) - 1
-        rel_idx = idx - self.cum_chunk_sizes[chunk_idx]
+        chunk_idx = np.searchsorted(self.cum_chunk_sizes, idx, side='right')
 
-        # Absolute index: which of global chunks we sampled
-        abs_idx = self.indices[chunk_idx]
+        if chunk_idx == 0:
+            rel_idx = idx
+            abs_idx = self.indices[0]
+        else:
+            rel_idx = idx - self.cum_chunk_sizes[chunk_idx - 1]
+            abs_idx = self.indices[chunk_idx]
 
         X = self.h5[f'X{abs_idx}'][rel_idx]
-        Y = self.h5[f'Y{abs_idx}'][rel_idx]
+        Y = self.h5[f'Y{abs_idx}'][0, rel_idx]  # Dataset generation code does this, idk why
 
         return {'x': X, 'y': Y}
 

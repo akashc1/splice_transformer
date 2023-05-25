@@ -294,12 +294,13 @@ def sample(state, prompt, steps, config, rng, temperature=1.0, top_k=None, top_p
 
 def train(config):
     rng = jax.random.PRNGKey(config.seed)
+
     workdir = FLAGS.workdir
     if workdir is None:
-        workdir = tempfile.mkdtemp()
-
-    workdir = Path(workdir)
-    workdir.mkdir()
+        workdir = Path(tempfile.mkdtemp())
+    else:
+        workdir = Path(workdir)
+        workdir.mkdir()
     logging.info(f'workdir: {workdir}')
 
     if config.wandb:
