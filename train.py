@@ -22,6 +22,7 @@ from transformers import GPT2TokenizerFast
 import wandb
 
 from dataset import get_train_val_datasets
+from models import get_conv_model
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -164,19 +165,19 @@ def numpy_collate(batch):
         return np.array(batch)
 
 
-def create_learning_rate_fn(config, examples_per_epoch):
+def create_learning_rate_fn(config, steps_per_epoch):
     if config.lr_cosine_decay:
         raise ValueError("Cosine decay schedule not supported!")
-        decay_steps = config.train_steps - config.lr_warmup_steps
-        opt_fn = optax.cosine_decay_schedule(
-            init_value=config.learning_rate, decay_steps=decay_steps
-        )
+        # decay_steps = config.train_steps - config.lr_warmup_steps
+        # opt_fn = optax.cosine_decay_schedule(
+        #     init_value=config.learning_rate, decay_steps=decay_steps
+        # )
     elif config.lr_exp_decay:
         opt_fn = optax.exponential_decay(
             config.learning_rate,
-            examples_per_epoch,
+            steps_per_epoch,
             config.lr_decay_rate,
-            transition_begin=(config.lr_decay_begin_epochs - 1) * examples_per_epoch,
+            transition_begin=(config.lr_decay_begin_epochs - 1) * steps_per_epoch,
             staircase=True,
         )
     else:
@@ -207,24 +208,14 @@ def create_weight_decay_param_mask(p):
     return p
 
 
-@functools.partial(jax.jit, static_argnums=(2,))
-def train_step(state, batch, config, dropout_rng):
-    tokens = batch['x']
-    next_tokens = batch['y']
-    dropout_rng = jax.random.fold_in(dropout_rng, state.step)
+def train_step(state, batch, dropout_rng):
+    x = batch['x']
+    label = batch['y']
 
     def loss_fn(params):
-        logits = Transformer(**config, deterministic=False).apply(
-            {'params': params},
-            tokens,
-            rngs={'dropout': dropout_rng},
-        )
-        chex.assert_equal_shape([logits[:, :, 0], next_tokens])
-        loss = jnp.mean(
-            optax.softmax_cross_entropy_with_integer_labels(
-                logits=logits, labels=next_tokens
-            )
-        )
+        logits = state.apply({'params': params}, x)
+        chex.assert_equal_shape([logits, label])
+        loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=label))
         return loss, logits
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -330,20 +321,21 @@ def train(config):
 
     # setup model and optimizer
     rng, init_rng = jax.random.split(rng)
-    model_config = frozen_dict.FrozenDict(
-        token_dim=train_dataset.vocab_size,
-        emb_dim=config.emb_dim,
-        n_blocks=config.n_blocks,
-        n_heads=config.n_heads,
-        block_size=config.block_size,
-        emb_dropout_prob=config.emb_dropout_prob,
-        block_dropout_prob=config.block_dropout_prob,
-        attn_dropout_prob=config.attn_dropout_prob,
-    )
-    model = Transformer(**model_config, deterministic=True)
-    fake_sequence = jnp.ones([1, config.block_size], dtype=jnp.int32)
+    # model_config = frozen_dict.FrozenDict(
+    #     token_dim=train_dataset.vocab_size,
+    #     emb_dim=config.emb_dim,
+    #     n_blocks=config.n_blocks,
+    #     n_heads=config.n_heads,
+    #     block_size=config.block_size,
+    #     emb_dropout_prob=config.emb_dropout_prob,
+    #     block_dropout_prob=config.block_dropout_prob,
+    #     attn_dropout_prob=config.attn_dropout_prob,
+    # )
+
+    model = get_conv_model(config.context_length)
+    fake_sequence = jnp.ones([1, 15000, 4], dtype=jnp.int32)
     params = model.init(init_rng, fake_sequence)['params']
-    learning_rate_fn = create_learning_rate_fn(config)
+    learning_rate_fn = create_learning_rate_fn(config, len(train_dataset) // config.batch_size)
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_norm_clip),
         optax.adamw(
@@ -363,10 +355,12 @@ def train(config):
     tabulate_fn = nn.tabulate(model, tabulate_rng)
     logging.info(tabulate_fn(fake_sequence))
 
+    p_train_step = jax.pmap(train_step, axis_name='batch')
+
     while state.step < config.train_steps:
         batch = next(data_iter)
         rng, dropout_rng = jax.random.split(rng)
-        state, (loss, _) = train_step(state, batch, model_config, dropout_rng)
+        state, (loss, _) = p_train_step(state, batch, dropout_rng)
 
         examples_seen += len(batch[list(batch.keys())[0]])
         epoch_frac = examples_seen / len(train_dataset)
@@ -390,16 +384,16 @@ def train(config):
                     step=int(state.step),
                 )
 
-        if state.step % config.eval_interval == 0:
-            rng, sample_rng = jax.random.split(rng)
-            seq = sample(
-                state,
-                jnp.array(train_dataset.encode("O God! O God!"))[None, :],
-                2000,
-                model_config,
-                sample_rng,
-            )
-            print(train_dataset.decode(np.array(seq[0])))
+        # if state.step % config.eval_interval == 0:
+        #     rng, sample_rng = jax.random.split(rng)
+        #     seq = sample(
+        #         state,
+        #         jnp.array(train_dataset.encode("O God! O God!"))[None, :],
+        #         2000,
+        #         model_config,
+        #         sample_rng,
+        #     )
+        #     print(train_dataset.decode(np.array(seq[0])))
 
         if state.step % config.ckpt_interval == 0:
             checkpoints.save_checkpoint(

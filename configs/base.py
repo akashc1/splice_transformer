@@ -20,17 +20,19 @@ def get_config():
     config.weight_decay = 0.1
     config.grad_norm_clip = 1.0
     config.batch_size = 64
+    config.epochs = 10
     config.train_steps = 250_000
 
     # model
-    config.emb_dim = 192
-    config.n_blocks = 6
-    config.n_heads = 6
-    config.block_size = 128
+    config.context_length = 2000
+    # config.emb_dim = 192
+    # config.n_blocks = 6
+    # config.n_heads = 6
+    # config.block_size = 128
 
-    config.emb_dropout_prob = 0.1
-    config.attn_dropout_prob = 0.1
-    config.block_dropout_prob = 0.1
+    # config.emb_dropout_prob = 0.1
+    # config.attn_dropout_prob = 0.1
+    # config.block_dropout_prob = 0.1
 
     # dataset
     config.data_file = '/home/gcpuser/splice/data/dataset_train_all.h5'

@@ -4,4 +4,5 @@ ml_collections
 distrax
 wandb
 torchvision
+colorama
 transformers  # tokenizers
