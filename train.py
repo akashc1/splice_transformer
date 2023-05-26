@@ -430,21 +430,18 @@ def train(config):
                 )
                 acceptor_results = {k: v for k, v in eval_results.items() if 'acceptor' in k}
                 donor_results = {k: v for k, v in eval_results.items() if 'donor' in k}
-                breakpoint()
-                logging.info(Fore.GREEN + Style.BRIGHT + f"Acceptor results:\n{Style.RESET_ALL}{json.dumps(acceptor_results, indent=4)}")
-                logging.info(Fore.GREEN + Style.BRIGHT + f"Donor results:\n{Style.RESET_ALL}{json.dumps(donor_results, indent=4)}")
+                logging.info(
+                    Fore.GREEN + Style.BRIGHT
+                    + f"Acceptor results:\n{Style.RESET_ALL}\n"
+                    + json.dumps(acceptor_results, indent=4)
+                )
+                logging.info(
+                    Fore.GREEN + Style.BRIGHT
+                    + f"Donor results:\n{Style.RESET_ALL}\n"
+                    + json.dumps(donor_results, indent=4)
+                )
                 logging.info(Style.RESET_ALL)
 
-
-            #     rng, sample_rng = jax.random.split(rng)
-            #     seq = sample(
-            #         state,
-            #         jnp.array(train_dataset.encode("O God! O God!"))[None, :],
-            #         2000,
-            #         model_config,
-            #         sample_rng,
-            #     )
-            #     print(train_dataset.decode(np.array(seq[0])))
 
             if step % config.ckpt_interval == 0:
                 checkpoints.save_checkpoint(
