@@ -388,7 +388,7 @@ def train(config):
 
     step = 0
 
-    for _ in range(config.epochs):
+    for e in range(config.epochs):
         for batch in train_dataloader:
             # create device axis which is used to map examples across devices
             inp, label = batch['x'], batch['y']
@@ -442,11 +442,10 @@ def train(config):
                 )
                 logging.info(Style.RESET_ALL)
 
-
-            if step % config.ckpt_interval == 0:
-                checkpoints.save_checkpoint(
-                    ckpt_dir, state, step, keep=float('inf')
-                )
+        dedup_state = flax.jax_utils.unreplicate(state)
+        checkpoints.save_checkpoint(
+            ckpt_dir, dedup_state, e, keep=float('inf')
+        )
 
     return state
 
