@@ -330,7 +330,7 @@ def train(config):
     train_dataloader = DataLoader(
         train_dataset,
         collate_fn=numpy_collate,
-        drop_last=False,
+        drop_last=True,
         shuffle=True,
         pin_memory=True,
         batch_size=config.batch_size,
