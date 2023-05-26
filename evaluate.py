@@ -52,3 +52,15 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
         results['f{name}_auc'] = average_precision_score(l, p)
 
     return results
+
+
+def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
+    """
+    Correct version of top-k accuracy, at least relative to intuition/interpretation of the paper.
+
+    In the original source code, top-k accuracy is computed relative to the entire
+    batch_size * sequence_length.
+
+    It is probably a more fair evaluation if this is done on a per-example level.
+    """
+    ...

@@ -218,7 +218,7 @@ def create_weight_decay_param_mask(p):
     return p
 
 
-def train_step(state, inp, label, dropout_rng):
+def train_step(state, inp, label):
 
     def loss_fn(params):
         logits, updates = state.apply_fn(
@@ -340,16 +340,6 @@ def train(config):
 
     # setup model and optimizer
     rng, init_rng = jax.random.split(rng)
-    # model_config = frozen_dict.FrozenDict(
-    #     token_dim=train_dataset.vocab_size,
-    #     emb_dim=config.emb_dim,
-    #     n_blocks=config.n_blocks,
-    #     n_heads=config.n_heads,
-    #     block_size=config.block_size,
-    #     emb_dropout_prob=config.emb_dropout_prob,
-    #     block_dropout_prob=config.block_dropout_prob,
-    #     attn_dropout_prob=config.attn_dropout_prob,
-    # )
 
     model = get_conv_model(config.context_length)
     fake_sequence = jnp.ones([1, SEQUENCE_LENGTH + config.context_length, 4], dtype=jnp.int32)
@@ -395,8 +385,7 @@ def train(config):
             inp = inp.reshape(shape_prefix + inp.shape[1:])
             label = label.reshape(shape_prefix + label.shape[1:])
 
-            # rng, dropout_rng = jax.random.split(rng)
-            state, (loss, logits) = p_train_step(state, inp, label, rng)
+            state, (loss, logits) = p_train_step(state, inp, label)
 
             examples_seen += np.prod(shape_prefix)
             epoch_frac = examples_seen / len(train_dataset)
