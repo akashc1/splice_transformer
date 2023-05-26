@@ -43,7 +43,7 @@ def get_config():
     # logging
     config.wandb = False
     config.logging_interval = 10
-    config.eval_interval = 500
+    config.eval_interval = 100
     config.ckpt_interval = 1000
 
     return config

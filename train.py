@@ -1,5 +1,5 @@
 import functools
-import itertools
+import json
 import pathlib
 from pathlib import Path
 import tempfile
@@ -15,15 +15,14 @@ from flax.training import checkpoints, train_state
 import jax
 import jax.numpy as jnp
 from ml_collections import config_flags
-from more_itertools import one
 import numpy as np
 import optax
-from torch.utils.data import DataLoader, Dataset
-from transformers import GPT2TokenizerFast
+from torch.utils.data import DataLoader
 import wandb
 
-from constants import MAX_CONTEXT_LENGTH, SEQUENCE_LENGTH
+from constants import SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
+from evaluate import top_k_accuracy
 from models import get_conv_model
 
 Fore = colorama.Fore
@@ -397,7 +396,7 @@ def train(config):
             label = label.reshape(shape_prefix + label.shape[1:])
 
             # rng, dropout_rng = jax.random.split(rng)
-            state, (loss, _) = p_train_step(state, inp, label, rng)
+            state, (loss, logits) = p_train_step(state, inp, label, rng)
 
             examples_seen += np.prod(shape_prefix)
             epoch_frac = examples_seen / len(train_dataset)
@@ -424,7 +423,19 @@ def train(config):
                         step=step,
                     )
 
-            # if state.step % config.eval_interval == 0:
+            if step % config.eval_interval == 0:
+                eval_results = top_k_accuracy(
+                    logits.reshape((config.batch_size,) + logits.shape[2:]),
+                    label.reshape((config.batch_size,) + label.shape[2:]),
+                )
+                acceptor_results = {k: v for k, v in eval_results.items() if 'acceptor' in k}
+                donor_results = {k: v for k, v in eval_results.items() if 'donor' in k}
+                breakpoint()
+                logging.info(Fore.GREEN + Style.BRIGHT + f"Acceptor results:\n{Style.RESET_ALL}{json.dumps(acceptor_results, indent=4)}")
+                logging.info(Fore.GREEN + Style.BRIGHT + f"Donor results:\n{Style.RESET_ALL}{json.dumps(donor_results, indent=4)}")
+                logging.info(Style.RESET_ALL)
+
+
             #     rng, sample_rng = jax.random.split(rng)
             #     seq = sample(
             #         state,
