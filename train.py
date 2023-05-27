@@ -9,9 +9,8 @@ import chex
 import colorama
 import distrax
 import flax
-from flax.core import frozen_dict
 import flax.linen as nn
-from flax.training import checkpoints, train_state
+from flax.training import checkpoints
 import jax
 import jax.numpy as jnp
 from ml_collections import config_flags
@@ -22,8 +21,9 @@ import wandb
 
 from constants import SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
-from evaluate import top_k_accuracy
+from evaluate import eval_dataset, fwd_batch, print_accuracy_results, top_k_accuracy
 from models import get_conv_model
+from state import TrainStateWithBN
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -37,14 +37,6 @@ config_flags.DEFINE_config_file(
     'File path to the training hyperparameter configuration.',
     lock_config=True,
 )
-
-
-class TrainStateWithBN(train_state.TrainState):
-    """
-    In jax batch statistics are handled separately, so need to create new state type
-    which also tracks the batch stats.
-    """
-    batch_stats: frozen_dict.FrozenDict
 
 
 # use GPT initializations
@@ -218,6 +210,15 @@ def create_weight_decay_param_mask(p):
     return p
 
 
+def cycle_iter(dl: DataLoader):
+    """
+    Infinitely cycle dataloader
+    """
+    while True:
+        dl_iter = iter(dl)
+        yield from dl_iter
+
+
 def train_step(state, inp, label):
 
     def loss_fn(params):
@@ -336,6 +337,16 @@ def train(config):
         batch_size=config.batch_size,
         num_workers=config.num_workers,
     )
+    val_dataloader = DataLoader(
+        val_dataset,
+        collate_fn=numpy_collate,
+        drop_last=True,
+        shuffle=False,
+        pin_memory=True,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+    )
+    val_iter = cycle_iter(val_dataloader)  # used to get never-ending batches of val data
     examples_seen = 0
 
     # setup model and optimizer
@@ -374,6 +385,7 @@ def train(config):
     state = flax.jax_utils.replicate(state)
     shape_prefix = (world_size, batch_size_per_device)
     p_train_step = jax.pmap(train_step, axis_name='batch')
+    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
     rng = jax.random.split(rng, num=world_size)
 
     step = 0
@@ -417,19 +429,34 @@ def train(config):
                     logits.reshape((config.batch_size,) + logits.shape[2:]),
                     label.reshape((config.batch_size,) + label.shape[2:]),
                 )
-                acceptor_results = {k: v for k, v in eval_results.items() if 'acceptor' in k}
-                donor_results = {k: v for k, v in eval_results.items() if 'donor' in k}
                 logging.info(
-                    Fore.GREEN + Style.BRIGHT
-                    + f"Acceptor results:\n{Style.RESET_ALL}\n"
-                    + json.dumps(acceptor_results, indent=4)
+                    Fore.MAGENTA + Style.BRIGHT
+                    + "Train eval results (1 batch):"
+                    + Style.RESET_ALL
                 )
+                print_accuracy_results(eval_results)
+
+                # sample & forward validation batch
+                val_batch = next(val_iter)
+                inp, label = val_batch['x'], val_batch['y']
+                inp = inp.reshape(shape_prefix + inp.shape[1:])
+                logits = p_fwd_fn(state, inp).reshape(label.shape)
+
+                val_results = top_k_accuracy(logits, label)
                 logging.info(
-                    Fore.GREEN + Style.BRIGHT
-                    + f"Donor results:\n{Style.RESET_ALL}\n"
-                    + json.dumps(donor_results, indent=4)
+                    Fore.LIGHTMAGENTA_EX + Style.BRIGHT
+                    + "Validation eval results: (1 batch)"
+                    + Style.RESET_ALL
                 )
-                logging.info(Style.RESET_ALL)
+                print_accuracy_results(val_results)
+
+        full_val_results = eval_dataset(val_dataloader, state)
+        logging.info(
+            Fore.LIGHTMAGENTA_EX + Style.BRIGHT
+            + "Validation eval results"
+            + Style.RESET_ALL
+        )
+        print_accuracy_results(full_val_results)
 
         dedup_state = flax.jax_utils.unreplicate(state)
         checkpoints.save_checkpoint(
