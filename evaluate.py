@@ -70,7 +70,7 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
 
         for k in ks:
             top_p_idx = sorted_p_idx[-int(k * n_true):]
-            den = min(n_true, len(top_p_idx))
+            den = min(n_true, len(top_p_idx)) + 1e-6
             acc = jnp.size(jnp.intersect1d(top_p_idx, true_idx)) / den
             thresh = p[sorted_p_idx[-int(k * n_true)]]
 

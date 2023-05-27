@@ -450,6 +450,9 @@ def train(config):
                 )
                 print_accuracy_results(val_results)
 
+                if config.wandb:
+                    wandb.log({'train_batch': eval_results, 'val_batch': val_results}, step=step)
+
         full_val_results = eval_dataset(val_dataloader, state)
         logging.info(
             Fore.LIGHTMAGENTA_EX + Style.BRIGHT
@@ -457,6 +460,8 @@ def train(config):
             + Style.RESET_ALL
         )
         print_accuracy_results(full_val_results)
+        if config.wandb:
+            wandb.log({'full_val': full_val_results}, step=step)
 
         dedup_state = flax.jax_utils.unreplicate(state)
         checkpoints.save_checkpoint(
