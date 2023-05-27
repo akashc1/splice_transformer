@@ -66,6 +66,9 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
         true_idx = jnp.nonzero(l)[0]
         n_true = len(true_idx)
 
+        if n_true == 0 or len(p) == 0:
+            continue
+
         sorted_p_idx = jnp.argsort(p)
 
         for k in ks:
