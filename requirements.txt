@@ -6,3 +6,4 @@ wandb
 torchvision
 colorama
 transformers  # tokenizers
+tensorflow
