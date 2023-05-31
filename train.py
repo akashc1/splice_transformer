@@ -1,5 +1,4 @@
 import functools
-import json
 import pathlib
 from pathlib import Path
 import tempfile
@@ -19,7 +18,7 @@ import optax
 from torch.utils.data import DataLoader
 import wandb
 
-from constants import SEQUENCE_LENGTH
+from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
 from evaluate import eval_dataset, fwd_batch, print_accuracy_results, top_k_accuracy
 from models import get_conv_model
@@ -307,6 +306,9 @@ def sample(state, prompt, steps, config, rng, temperature=1.0, top_k=None, top_p
 
 
 def train(config):
+    assert (
+        config.context_length in CONTEXT_LENGTHS
+    ), f'{config.context_length=} not permitted, must be one of {CONTEXT_LENGTHS}'
     rng = jax.random.PRNGKey(config.seed)
 
     world_size = jax.device_count()
@@ -324,7 +326,7 @@ def train(config):
     logging.info(f'workdir: {workdir}')
 
     if config.wandb:
-        wandb.init(project='splice-transformer', config=config)
+        wandb.init(project='splice-transformer', entity='akashc', config=config)
 
     # setup data pipeline
     train_dataset, val_dataset = get_train_val_datasets(config.data_file, config.context_length)
