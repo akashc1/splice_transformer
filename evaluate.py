@@ -148,9 +148,11 @@ def batched_fwd(X, batch_size: int, state: TrainStateWithBN):
     ragged_pmap, ragged_remaining = divmod(num_ragged, world_size)
 
     if ragged_pmap > 0:
-        Xb = X[num_full_batches * batch_size:-ragged_remaining].reshape(
-            (world_size, ragged_pmap) + X.shape[1:]
+        Xb = (
+            X[num_full_batches * batch_size:-ragged_remaining]
+            if ragged_remaining > 0 else X[num_full_batches * batch_size:]
         )
+        Xb = Xb.reshape((world_size, ragged_pmap) + X.shape[1:])
         out_b = p_fwd_fn(state, Xb).reshape((ragged_pmap * world_size, SEQUENCE_LENGTH, -1))
         out.append(out_b)
 
