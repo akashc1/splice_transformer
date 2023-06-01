@@ -188,7 +188,8 @@ def eval_dataset(ds: H5SpliceDataset, batch_size: int, state: TrainStateWithBN):
 
     agg_results = defaultdict(AverageMeter)
     for i in tqdm(range(len(ds)), desc='Evaluating dataset'):
-        X_chunk, label_chunk = ds[i]
+        batch = ds[i]
+        X_chunk, label_chunk = batch['x'], batch['y']
 
         logits_chunk = batched_fwd(X_chunk, batch_size, state)
         batch_results = top_k_accuracy(logits_chunk, label_chunk)
