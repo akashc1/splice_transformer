@@ -3,6 +3,7 @@ import pathlib
 from pathlib import Path
 import sys
 import tempfile
+import random
 
 from absl import app, flags, logging
 import chex
@@ -16,12 +17,12 @@ import jax.numpy as jnp
 from ml_collections import config_flags
 import numpy as np
 import optax
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import wandb
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
-from evaluate import eval_dataset, fwd_batch, print_accuracy_results, top_k_accuracy
+from evaluate import eval_dataset, fwd_batch, print_accuracy_results, top_k_accuracy, batched_fwd
 from models import get_conv_model
 from state import TrainStateWithBN
 
@@ -219,6 +220,11 @@ def cycle_iter(dl: DataLoader):
         yield from dl_iter
 
 
+def sample_dataset(ds: Dataset):
+    idx = random.randint(0, len(ds))
+    return ds[idx]
+
+
 def train_step(state, inp, label):
 
     def loss_fn(params):
@@ -330,7 +336,10 @@ def train(config):
         wandb.init(project='splice-transformer', entity='akashc', config=config)
 
     # setup data pipeline
-    train_dataset, val_dataset = get_train_val_datasets(config.data_file, config.context_length)
+    train_dataset, train_chunk_dataset, val_dataset = get_train_val_datasets(
+        config.data_file,
+        config.context_length,
+    )
     train_dataloader = DataLoader(
         train_dataset,
         collate_fn=numpy_collate,
@@ -340,16 +349,6 @@ def train(config):
         batch_size=config.batch_size,
         num_workers=config.num_workers,
     )
-    val_dataloader = DataLoader(
-        val_dataset,
-        collate_fn=numpy_collate,
-        drop_last=True,
-        shuffle=False,
-        pin_memory=True,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-    )
-    val_iter = cycle_iter(val_dataloader)  # used to get never-ending batches of val data
     examples_seen = 0
 
     # setup model and optimizer
@@ -388,7 +387,6 @@ def train(config):
     state = flax.jax_utils.replicate(state)
     shape_prefix = (world_size, batch_size_per_device)
     p_train_step = jax.pmap(train_step, axis_name='batch')
-    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
     rng = jax.random.split(rng, num=world_size)
 
     step = 0
@@ -428,35 +426,41 @@ def train(config):
                     )
 
             if step % config.eval_interval == 0:
-                eval_results = top_k_accuracy(
-                    logits.reshape((config.batch_size,) + logits.shape[2:]),
-                    label.reshape((config.batch_size,) + label.shape[2:]),
-                )
+                tr_chunk = sample_dataset(train_chunk_dataset)
+                Xtr_chunk, Ytr_chunk = tr_chunk['x'], tr_chunk['y']
+                logits_chunk = batched_fwd(Xtr_chunk, config.batch_size, state)
+                tr_eval_results = top_k_accuracy(logits_chunk, Ytr_chunk)
                 logging.info(
                     Fore.MAGENTA + Style.BRIGHT
                     + "Train eval results (1 batch):"
                     + Style.RESET_ALL
                 )
-                print_accuracy_results(eval_results)
+                print_accuracy_results(tr_eval_results)
 
                 # sample & forward validation batch
-                val_batch = next(val_iter)
-                inp, label = val_batch['x'], val_batch['y']
-                inp = inp.reshape(shape_prefix + inp.shape[1:])
-                logits = p_fwd_fn(state, inp).reshape(label.shape)
+                val_chunk = sample_dataset(val_dataset)
+                Xval_chunk, Yval_chunk = val_chunk['x'], val_chunk['y']
+                logits_chunk = batched_fwd(Xval_chunk, config.batch_size, state)
+                val_eval_results = top_k_accuracy(logits_chunk, Yval_chunk)
 
-                val_results = top_k_accuracy(logits, label)
                 logging.info(
                     Fore.LIGHTMAGENTA_EX + Style.BRIGHT
                     + "Validation eval results: (1 batch)"
                     + Style.RESET_ALL
                 )
-                print_accuracy_results(val_results)
+                print_accuracy_results(val_eval_results)
 
                 if config.wandb:
-                    wandb.log({'train_batch': eval_results, 'val_batch': val_results}, step=step)
+                    wandb.log(
+                        {
+                            'train_batch': tr_eval_results,
+                            'val_batch': val_eval_results
+                        },
+                        step=step,
+                    )
 
-        full_val_results = eval_dataset(val_dataloader, state)
+
+        full_val_results = eval_dataset(val_dataset, config.batch_size, state)
         logging.info(
             Fore.LIGHTMAGENTA_EX + Style.BRIGHT
             + "Validation eval results"

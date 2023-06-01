@@ -1,16 +1,22 @@
 from collections import defaultdict
+import flax
+import numpy as np
+import sys
 import json
-import logging
 
 import chex
 import colorama
 import jax
 from jax import numpy as jnp
 from sklearn.metrics import average_precision_score
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from state import TrainStateWithBN
+from absl import app, flags, logging
+from ml_collections import config_flags
+
+from dataset import H5SpliceDataset
+from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -42,6 +48,8 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
     several bugs.
     """
     chex.assert_equal_shape([logits, labels])
+    assert logits.ndim == 3, f'Expect 3D logits (B, T, C), but got {logits.shape}'
+    assert labels.ndim == 3, f'Expect 3D labels (B, T, C), but got {labels.shape}'
 
     # remove examples which have no splice sites
     has_expr = labels[:, :, 1:].sum((1, 2)) > 0
@@ -102,7 +110,7 @@ def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
 
 def fwd_batch(state, inputs):
     """
-    Forward a single batch
+    Forward a single batch with no gradients
     """
 
     logits = state.apply_fn(
@@ -113,7 +121,51 @@ def fwd_batch(state, inputs):
     return logits
 
 
-def eval_dataset(dl: DataLoader, state: TrainStateWithBN):
+def batched_fwd(X, batch_size: int, state: TrainStateWithBN):
+    """
+    Forward a whole chunk of data (e.g. large segment of a chromosome)
+    """
+    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
+
+    world_size = jax.device_count()
+    assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
+    batch_size_per_device = batch_size // world_size
+    shape_prefix = (world_size, batch_size_per_device)
+
+    out = []
+    num_full_batches, num_ragged = divmod(X.shape[0], batch_size)
+    for i in range(num_full_batches):
+        Xb = X[i * batch_size:(i + 1) * batch_size]
+        Xb = Xb.reshape(shape_prefix + Xb.shape[1:])
+
+        out_b = p_fwd_fn(state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
+        out.append(out_b)
+
+    if not num_ragged:
+        return jnp.concatenate(out)
+
+    # data parallel ragged
+    ragged_pmap, ragged_remaining = divmod(num_ragged, world_size)
+
+    if ragged_pmap > 0:
+        Xb = X[num_full_batches * batch_size:-ragged_remaining].reshape(
+            (world_size, ragged_pmap) + X.shape[1:]
+        )
+        out_b = p_fwd_fn(state, Xb).reshape((ragged_pmap * world_size, SEQUENCE_LENGTH, -1))
+        out.append(out_b)
+
+    if not ragged_remaining:
+        return jnp.concatenate(out)
+
+    # final ragged, just one device
+    Xb = X[-ragged_remaining:]
+    out_b = fwd_batch(flax.jax_utils.unreplicate(state), Xb)
+    out.append(out_b)
+
+    return jnp.concatenate(out)
+
+
+def eval_dataset(ds: H5SpliceDataset, batch_size: int, state: TrainStateWithBN):
     """
     Run evaluation on all examples in a dataloader, parallelized across devices.
 
@@ -130,21 +182,14 @@ def eval_dataset(dl: DataLoader, state: TrainStateWithBN):
     """
 
     world_size = jax.device_count()
-    assert dl.batch_size % world_size == 0, f"{dl.batch_size=} must be divisible by {world_size=}"
-    batch_size_per_device = dl.batch_size // world_size
-    shape_prefix = (world_size, batch_size_per_device)
-
-    # NOTE: cannot pmap accuracy function because it cannot trivially be jit'd.
-    # However we do still make the forward pass data-parallel
-    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
+    assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
 
     agg_results = defaultdict(AverageMeter)
-    for batch in tqdm(dl, desc='Evaluating dataset'):
-        inp, label = batch['x'], batch['y']
-        inp = inp.reshape(shape_prefix + inp.shape[1:])
+    for i in tqdm(range(len(ds)), desc='Evaluating dataset'):
+        X_chunk, label_chunk = ds[i]
 
-        logits = p_fwd_fn(state, inp).reshape(label.shape)
-        batch_results = top_k_accuracy(logits, label)
+        logits_chunk = batched_fwd(X_chunk, batch_size, state)
+        batch_results = top_k_accuracy(logits_chunk, label_chunk)
         for k, v in batch_results.items():
             if k.endswith('num_true'):
                 continue
@@ -171,3 +216,43 @@ def print_accuracy_results(results: dict):
         + f"Donor results:\n{Style.RESET_ALL}\n"
         + json.dumps(donor_results, indent=4)
     )
+
+
+def test(config):
+
+    assert (
+        config.context_length in CONTEXT_LENGTHS
+    ), f'{config.context_length=} not permitted, must be one of {CONTEXT_LENGTHS}'
+    rng = jax.random.PRNGKey(config.seed)
+
+    world_size = jax.device_count()
+    assert (
+        config.batch_size % world_size == 0
+    ), f"{config.batch_size} must be divisible by {world_size=}"
+    batch_size_per_device = config.batch_size // world_size
+
+
+def main(argv):
+    del argv  # Unused.
+
+    config = FLAGS.config
+    np.random.seed(config.seed)
+    _ = test(config)
+
+
+if __name__ == '__main__':
+    print(f"Cmd: `python {' '.join(sys.argv)}`")
+
+    FLAGS = flags.FLAGS
+
+    flags.DEFINE_string('workdir', None, 'Directory to store model data.')
+    config_flags.DEFINE_config_file(
+        'config',
+        None,
+        'File path to the training hyperparameter configuration.',
+        lock_config=True,
+    )
+    flags.mark_flags_as_required(['config'])
+
+    jax.config.config_with_absl()
+    app.run(main)
