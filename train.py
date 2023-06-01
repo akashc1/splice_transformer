@@ -1,6 +1,7 @@
 import functools
 import pathlib
 from pathlib import Path
+import sys
 import tempfile
 
 from absl import app, flags, logging
@@ -482,6 +483,7 @@ def main(argv):
 
 
 if __name__ == '__main__':
+    print(f"Cmd: `python {' '.join(sys.argv)}`")
     flags.mark_flags_as_required(['config'])
     jax.config.config_with_absl()
     app.run(main)
