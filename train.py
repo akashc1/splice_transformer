@@ -4,6 +4,7 @@ from pathlib import Path
 import random
 import sys
 import tempfile
+from timeit import default_timer
 
 from absl import app, flags, logging
 import chex
@@ -391,14 +392,20 @@ def train(config):
 
     step = 0
 
+    start = e_start = default_timer()
     for e in range(config.epochs):
+        data_start = default_timer()
         for batch in train_dataloader:
             # create device axis which is used to map examples across devices
             inp, label = batch['x'], batch['y']
             inp = inp.reshape(shape_prefix + inp.shape[1:])
             label = label.reshape(shape_prefix + label.shape[1:])
 
+            fwd_bwd_start = default_timer()
+            data_time = fwd_bwd_start - data_start
             state, (loss, logits) = p_train_step(state, inp, label)
+            fwd_bwd_time = default_timer() - fwd_bwd_start
+            total_step_time = default_timer() - data_start
 
             examples_seen += np.prod(shape_prefix)
             epoch_frac = examples_seen / len(train_dataset)
@@ -409,7 +416,7 @@ def train(config):
                 lr = learning_rate_fn(step)
                 logging.info(
                     f'step {step} | epoch {epoch_frac:.2f} | lr {lr:.4f} | '
-                    f'loss {loss:.4f}'
+                    f'loss {loss:.4f} | data_t {data_time:.3f} | fwdbwd_t {fwd_bwd_time:.3f}'
                 )
 
                 if config.wandb:
@@ -425,7 +432,7 @@ def train(config):
                         step=step,
                     )
 
-            if step % config.eval_interval == 0:
+            if config.eval_interval != -1 and step % config.eval_interval == 0:
                 tr_chunk = sample_dataset(train_chunk_dataset)
                 Xtr_chunk, Ytr_chunk = tr_chunk['x'], tr_chunk['y']
                 logits_chunk = batched_fwd(Xtr_chunk, config.batch_size, state)
@@ -459,7 +466,9 @@ def train(config):
                         step=step,
                     )
 
+            data_start = default_timer()
 
+        eval_start = default_timer()
         full_val_results = eval_dataset(val_dataset, config.batch_size, state)
         logging.info(
             Fore.LIGHTMAGENTA_EX + Style.BRIGHT
@@ -467,13 +476,19 @@ def train(config):
             + Style.RESET_ALL
         )
         print_accuracy_results(full_val_results)
+        logging.info(f"Validation eval time: {default_timer() - eval_start:.3f}")
         if config.wandb:
             wandb.log({'full_val': full_val_results}, step=step)
 
         dedup_state = flax.jax_utils.unreplicate(state)
-        checkpoints.save_checkpoint(
-            ckpt_dir, dedup_state, e, keep=float('inf')
-        )
+        if (e + 1) % config.ckpt_interval_epochs == 0:
+            checkpoints.save_checkpoint(
+                ckpt_dir, dedup_state, e, keep=float('inf')
+            )
+        logging.info(f"Epoch time: {default_timer() - e_start:.3f}")
+        e_start = default_timer()
+
+    logging.info(f"Total training time: {default_timer() - start:.3f}")
 
     return state
 

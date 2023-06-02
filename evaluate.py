@@ -2,6 +2,7 @@ from collections import defaultdict
 import json
 import sys
 
+from flax.training import checkpoints
 from absl import app, flags, logging
 import chex
 import colorama
@@ -14,6 +15,7 @@ from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
+from models import get_conv_model
 from dataset import H5SpliceDataset, get_test_dataset
 from state import TrainStateWithBN
 
@@ -233,6 +235,8 @@ def test(config):
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
     batch_size_per_device = config.batch_size // world_size
+    test_ds = get_test_dataset(config.eval_path)
+    models = [get_conv_model(config.context_length) for _ in range(5)]
 
 
 def main(argv):

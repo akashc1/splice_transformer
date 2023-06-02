@@ -43,7 +43,7 @@ def get_config():
     # logging
     config.wandb = True
     config.logging_interval = 50
-    config.eval_interval = 500
-    config.ckpt_interval = 1000
+    config.eval_interval = -1  # no sampled eval during training (still does full val each epoch)
+    config.ckpt_interval_epochs = 2
 
     return config
