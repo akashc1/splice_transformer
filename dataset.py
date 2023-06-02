@@ -84,3 +84,12 @@ def get_train_val_datasets(h5_path, context_length, val_proportion=0.9):
         H5SpliceDataset(h5_path, tr_idx, context_length, load_chunks=True),
         H5SpliceDataset(h5_path, val_idx, context_length, load_chunks=True),
     )
+
+
+def get_test_dataset(h5_path, context_length):
+
+    with h5py.File(h5_path, 'r') as f:
+        num_chunks = len(f.keys()) // 2
+
+    idx = list(range(num_chunks))
+    return H5SpliceDataset(h5_path, idx, context_length, load_chunks=True)

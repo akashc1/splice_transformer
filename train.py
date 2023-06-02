@@ -1,9 +1,9 @@
 import functools
 import pathlib
 from pathlib import Path
+import random
 import sys
 import tempfile
-import random
 
 from absl import app, flags, logging
 import chex
@@ -22,7 +22,7 @@ import wandb
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
-from evaluate import eval_dataset, fwd_batch, print_accuracy_results, top_k_accuracy, batched_fwd
+from evaluate import batched_fwd, eval_dataset, print_accuracy_results, top_k_accuracy
 from models import get_conv_model
 from state import TrainStateWithBN
 
@@ -221,7 +221,7 @@ def cycle_iter(dl: DataLoader):
 
 
 def sample_dataset(ds: Dataset):
-    idx = random.randint(0, len(ds))
+    idx = random.randint(0, len(ds) - 1)
     return ds[idx]
 
 

@@ -1,22 +1,21 @@
 from collections import defaultdict
-import flax
-import numpy as np
-import sys
 import json
+import sys
 
+from absl import app, flags, logging
 import chex
 import colorama
+import flax
 import jax
 from jax import numpy as jnp
+from ml_collections import config_flags
+import numpy as np
 from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
 
-from state import TrainStateWithBN
-from absl import app, flags, logging
-from ml_collections import config_flags
-
-from dataset import H5SpliceDataset
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
+from dataset import H5SpliceDataset, get_test_dataset
+from state import TrainStateWithBN
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -131,8 +130,9 @@ def batched_fwd(X, batch_size: int, state: TrainStateWithBN):
     assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
     batch_size_per_device = batch_size // world_size
     shape_prefix = (world_size, batch_size_per_device)
-
     out = []
+
+    # data parallel full batches
     num_full_batches, num_ragged = divmod(X.shape[0], batch_size)
     for i in range(num_full_batches):
         Xb = X[i * batch_size:(i + 1) * batch_size]
