@@ -15,7 +15,7 @@ import numpy as np
 from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
 
-from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
+from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
 from models import get_conv_model
 from dataset import H5SpliceDataset, get_test_dataset
 from state import TrainStateWithBN, ModelState
@@ -253,28 +253,32 @@ def test(argv):
     assert (
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
-    test_ds = get_test_dataset(config.eval_path)
+
+    test_ds = get_test_dataset(TEST_DATA_PATH)
+
+    # load the different models we're ensembling
     model = get_conv_model(config.context_length)
     model_params = get_models(FLAGS.ckpt_cache, FLAGS.ckpt_prefix, model.apply, FLAGS.num_models)
 
-    all_logits, all_labels = [], []
+    all_probs, all_labels = [], []
     for i in tqdm(range(len(test_ds)), desc='Running evaluation on test dataset'):
         batch = test_ds[i]
         X_chunk, label_chunk = batch['x'], batch['y']
 
+        # compute averaged probabilities across all models on this chunk
         m1, *_models = model_params
-        logits = jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m1), axis=-1)
+        probs = jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m1), axis=-1)
         for m in _models:
-            logits += jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m), axis=-1)
+            probs += jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m), axis=-1)
 
-        logits /= len(model_params)
-        all_logits.append(logits)
+        probs /= len(model_params)
+        all_probs.append(probs)
         all_labels.append(label_chunk)
 
-    all_logits = jnp.concatenate(all_logits)
+    all_probs = jnp.concatenate(all_probs)
     all_labels = jnp.concatenate(all_labels)
 
-    test_results = top_k_accuracy(all_logits, all_labels, do_softmax=False)
+    test_results = top_k_accuracy(all_probs, all_labels, do_softmax=False)
     print_accuracy_results(test_results)
 
 

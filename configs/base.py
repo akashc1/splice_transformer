@@ -1,4 +1,5 @@
 import ml_collections
+from constants import TRAIN_DATA_PATH
 
 
 def get_config():
@@ -35,7 +36,7 @@ def get_config():
     # config.block_dropout_prob = 0.1
 
     # dataset
-    config.data_file = '/home/akashc/splice/splice_2019/dataset_train_all.h5'
+    config.data_file = TRAIN_DATA_PATH
 
     # dataloader
     config.num_workers = 0
