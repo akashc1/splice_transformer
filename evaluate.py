@@ -1,8 +1,9 @@
+from pathlib import Path
+from typing import List, Callable
 from collections import defaultdict
 import json
 import sys
 
-from flax.training import checkpoints
 from absl import app, flags, logging
 import chex
 import colorama
@@ -17,7 +18,7 @@ from tqdm.auto import tqdm
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 from models import get_conv_model
 from dataset import H5SpliceDataset, get_test_dataset
-from state import TrainStateWithBN
+from state import TrainStateWithBN, ModelState
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -42,7 +43,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
+def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4), do_softmax=True):
     """
     Top-k accuracy as described in the original paper.
     Note that this implementation is actually different from theirs, since theirs has
@@ -60,7 +61,7 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4)):
     logits, labels = logits.reshape(B * T, C), labels.reshape(B * T, C)
 
     boundary_mask = labels[:, 1:].sum(1) > 0  # either splice acceptor or donor
-    probs = jax.nn.softmax(logits, axis=-1)
+    probs = jax.nn.softmax(logits, axis=-1) if do_softmax else logits
     acceptor_probs, donor_probs = probs[boundary_mask, 1], probs[boundary_mask, 2]
     acceptor_labels, donor_labels = labels[boundary_mask, 1], labels[boundary_mask, 2]
 
@@ -122,7 +123,7 @@ def fwd_batch(state, inputs):
     return logits
 
 
-def batched_fwd(X, batch_size: int, state: TrainStateWithBN):
+def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
     """
     Forward a whole chunk of data (e.g. large segment of a chromosome)
     """
@@ -223,28 +224,58 @@ def print_accuracy_results(results: dict):
     )
 
 
-def test(config):
+def get_models(
+    basedir: Path,
+    ckpt_prefix: str,
+    apply_fn: Callable,
+    num_models: int = 5,
+) -> List[ModelState]:
+    dirs = sorted(basedir.glob(f'{ckpt_prefix}*'))[:num_models]
+    assert (
+        len(dirs) == num_models
+    ), f'Expected {num_models} models with {ckpt_prefix=} in {basedir}, but only found {dirs}'
+    model_states = [ModelState.from_ckpt_dir(d, apply_fn) for d in dirs]
+    return model_states
+
+
+def test(argv):
+    breakpoint()
+
+    config = FLAGS.config
+    np.random.seed(config.seed)
 
     assert (
         config.context_length in CONTEXT_LENGTHS
     ), f'{config.context_length=} not permitted, must be one of {CONTEXT_LENGTHS}'
-    rng = jax.random.PRNGKey(config.seed)
+    assert FLAGS.num_models <= 5, f'Expected a maximum of 5 models but got {FLAGS.num_models}!'
 
     world_size = jax.device_count()
     assert (
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
-    batch_size_per_device = config.batch_size // world_size
     test_ds = get_test_dataset(config.eval_path)
-    models = [get_conv_model(config.context_length) for _ in range(5)]
+    model = get_conv_model(config.context_length)
+    model_params = get_models(FLAGS.ckpt_cache, FLAGS.ckpt_prefix, model.apply, FLAGS.num_models)
 
+    all_logits, all_labels = [], []
+    for i in tqdm(range(len(test_ds)), desc='Running evaluation on test dataset'):
+        batch = test_ds[i]
+        X_chunk, label_chunk = batch['x'], batch['y']
 
-def main(argv):
-    del argv  # Unused.
+        m1, *_models = model_params
+        logits = jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m1), axis=-1)
+        for m in _models:
+            logits += jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m), axis=-1)
 
-    config = FLAGS.config
-    np.random.seed(config.seed)
-    _ = test(config)
+        logits /= len(model_params)
+        all_logits.append(logits)
+        all_labels.append(label_chunk)
+
+    all_logits = jnp.concatenate(all_logits)
+    all_labels = jnp.concatenate(all_labels)
+
+    test_results = top_k_accuracy(all_logits, all_labels, do_softmax=False)
+    print_accuracy_results(test_results)
 
 
 if __name__ == '__main__':
@@ -252,14 +283,25 @@ if __name__ == '__main__':
 
     FLAGS = flags.FLAGS
 
-    flags.DEFINE_string('workdir', None, 'Directory to store model data.')
+    flags.DEFINE_string('ckpt_cache', 'checkpoints', 'Root directory model data is stored.')
+    flags.DEFINE_string(
+        'ckpt_prefix',
+        None,
+        'Template of directory names containing models',
+        required=True,
+    )
+    flags.DEFINE_string(
+        'num_models',
+        None,
+        'Number of models matching template to use',
+        required=True,
+    )
     config_flags.DEFINE_config_file(
         'config',
         None,
         'File path to the training hyperparameter configuration.',
         lock_config=True,
     )
-    flags.mark_flags_as_required(['config'])
 
     jax.config.config_with_absl()
-    app.run(main)
+    app.run(test)
