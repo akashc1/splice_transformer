@@ -183,7 +183,7 @@ class Transformer(nn.Module):
         self.head = Dense(self.n_classes)
 
     def __call__(self, x):
-        t = x.shape[1]
+        t = x.shape[1]  # (B, SEQUENCE_LENGTH + CONTEXT_LENGTH, C)
 
         emb_tokens = self.token_emb(x)
         emb_pos = self.pos_embedding[:, :t, :]
@@ -201,6 +201,7 @@ def get_conv_model(context_length: int):
 
 
 def get_bert(config):
+    # skip fields from base `nn.Module`
     fnames = [f.name for f in fields(Transformer) if f.name not in {'parent', 'name'}]
     transformer_kwargs = {k: getattr(config, k) for k in fnames}
     return Transformer(**transformer_kwargs)

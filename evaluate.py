@@ -11,7 +11,6 @@ import flax
 import jax
 from jax import numpy as jnp
 from ml_collections import config_flags
-from more_itertools import one
 import numpy as np
 from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
@@ -274,7 +273,7 @@ def test(argv):
     )
 
     # measure parameter count before replicating
-    num_params = sum(x.size for x in jax.tree_leaves(model_params[0]))
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(model_params[0]))
     logging.info(f"Number of model parameters: {num_params:,}")
 
     model_params = [flax.jax_utils.replicate(m) for m in model_params]
