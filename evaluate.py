@@ -11,6 +11,7 @@ import flax
 import jax
 from jax import numpy as jnp
 from ml_collections import config_flags
+from more_itertools import one
 import numpy as np
 from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
@@ -170,7 +171,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
 
     # final ragged, just one device
     Xb = X[-ragged_remaining:]
-    out_b = fwd_batch(flax.jax_utils.unreplicate(state), Xb)
+    out_b = fwd_batch(flax.jax_utils.unreplicate(state), Xb, batch_stats)
     out.append(out_b)
 
     return jnp.concatenate(out)
@@ -250,6 +251,7 @@ def test(argv):
     config = FLAGS.config
     np.random.seed(config.seed)
 
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     assert (
         config.context_length in CONTEXT_LENGTHS
     ), f'{config.context_length=} not permitted, must be one of {CONTEXT_LENGTHS}'
@@ -270,6 +272,11 @@ def test(argv):
         model.apply,
         FLAGS.num_models,
     )
+
+    # measure parameter count before replicating
+    num_params = sum(x.size for x in jax.tree_leaves(model_params[0]))
+    logging.info(f"Number of model parameters: {num_params:,}")
+
     model_params = [flax.jax_utils.replicate(m) for m in model_params]
 
     all_probs, all_labels = [], []
