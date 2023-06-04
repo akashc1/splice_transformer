@@ -33,6 +33,7 @@ Style = colorama.Style
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('workdir', None, 'Directory to store model data.')
+flags.DEFINE_boolean('run_eval', True, 'Run eval on full validation dataset each epoch')
 config_flags.DEFINE_config_file(
     'config',
     None,
@@ -345,7 +346,7 @@ def train(config):
         train_dataset,
         collate_fn=numpy_collate,
         drop_last=True,
-        shuffle=True,
+        shuffle=config.shuffle,
         pin_memory=True,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
@@ -468,20 +469,21 @@ def train(config):
 
             data_start = default_timer()
 
-        eval_start = default_timer()
-        full_val_results = eval_dataset(val_dataset, config.batch_size, state)
-        logging.info(
-            Fore.LIGHTMAGENTA_EX + Style.BRIGHT
-            + "Validation eval results"
-            + Style.RESET_ALL
-        )
-        print_accuracy_results(full_val_results)
-        logging.info(f"Validation eval time: {default_timer() - eval_start:.3f}")
-        if config.wandb:
-            wandb.log({'full_val': full_val_results}, step=step)
+        if FLAGS.run_eval:
+            eval_start = default_timer()
+            full_val_results = eval_dataset(val_dataset, config.batch_size, state)
+            logging.info(
+                Fore.LIGHTMAGENTA_EX + Style.BRIGHT
+                + "Validation eval results"
+                + Style.RESET_ALL
+            )
+            print_accuracy_results(full_val_results)
+            logging.info(f"Validation eval time: {default_timer() - eval_start:.3f}")
+            if config.wandb:
+                wandb.log({'full_val': full_val_results}, step=step)
 
-        dedup_state = flax.jax_utils.unreplicate(state)
         if (e + 1) % config.ckpt_interval_epochs == 0:
+            dedup_state = flax.jax_utils.unreplicate(state)
             checkpoints.save_checkpoint(
                 ckpt_dir, dedup_state, e, keep=float('inf')
             )

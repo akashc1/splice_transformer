@@ -38,6 +38,7 @@ def get_config():
 
     # dataset
     config.data_file = TRAIN_DATA_PATH
+    config.shuffle = True
 
     # dataloader
     config.num_workers = 48
