@@ -40,7 +40,7 @@ def get_config():
     config.data_file = TRAIN_DATA_PATH
 
     # dataloader
-    config.num_workers = 0
+    config.num_workers = 48
 
     # logging
     config.wandb = True
