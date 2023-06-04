@@ -1,8 +1,8 @@
-from pathlib import Path
-from typing import List, Callable
 from collections import defaultdict
 import json
+from pathlib import Path
 import sys
+from typing import Callable, List, Union
 
 from absl import app, flags, logging
 import chex
@@ -16,9 +16,9 @@ from sklearn.metrics import average_precision_score
 from tqdm.auto import tqdm
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
-from models import get_conv_model
 from dataset import H5SpliceDataset, get_test_dataset
-from state import TrainStateWithBN, ModelState
+from models import get_conv_model
+from state import ModelState, TrainStateWithBN
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -239,7 +239,7 @@ def get_models(
 
 
 def test(argv):
-    breakpoint()
+    del argv  # unused, but required to accept from absl.app
 
     config = FLAGS.config
     np.random.seed(config.seed)
@@ -254,11 +254,17 @@ def test(argv):
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
 
-    test_ds = get_test_dataset(TEST_DATA_PATH)
+    test_ds = get_test_dataset(TEST_DATA_PATH, config.context_length)
 
     # load the different models we're ensembling
     model = get_conv_model(config.context_length)
-    model_params = get_models(FLAGS.ckpt_cache, FLAGS.ckpt_prefix, model.apply, FLAGS.num_models)
+    model_params = get_models(
+        Path(FLAGS.ckpt_cache),
+        FLAGS.ckpt_prefix,
+        model.apply,
+        FLAGS.num_models,
+    )
+    model_params = [flax.jax_utils.replicate(m) for m in model_params]
 
     all_probs, all_labels = [], []
     for i in tqdm(range(len(test_ds)), desc='Running evaluation on test dataset'):
@@ -294,7 +300,7 @@ if __name__ == '__main__':
         'Template of directory names containing models',
         required=True,
     )
-    flags.DEFINE_string(
+    flags.DEFINE_integer(
         'num_models',
         None,
         'Number of models matching template to use',

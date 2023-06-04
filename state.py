@@ -1,9 +1,11 @@
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
-from flax.training import train_state, checkpoints
+import flax
+from flax import struct
 from flax.core import frozen_dict
+from flax.training import checkpoints, train_state
 
 
 class TrainStateWithBN(train_state.TrainState):
@@ -15,15 +17,14 @@ class TrainStateWithBN(train_state.TrainState):
 
 
 @dataclass
-class ModelState:
+class ModelState(struct.PyTreeNode):
     """
     Container for the state needed to forward a model. Used to run forward pass
     without creating a gradient transformation or optimizer state (as is needed in `TrainState`)
     """
-
-    params: dict
-    batch_stats: dict
-    apply_fn: Callable
+    params: dict = struct.field(pytree_node=True)
+    batch_stats: dict = struct.field(pytree_node=True)
+    apply_fn: Callable = struct.field(pytree_node=False)
 
     @classmethod
     def from_ckpt_dir(cls, ckpt_dir, apply_fn):
@@ -33,7 +34,3 @@ class ModelState:
 
         all_params = checkpoints.restore_checkpoint(ckpt_dir, None)
         return cls(all_params['params'], all_params['batch_stats'], apply_fn)
-
-    @property
-    def param_dict(self):
-        return {'params': self.params, 'batch_stats': self.batch_stats}
