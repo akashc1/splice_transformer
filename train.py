@@ -19,13 +19,13 @@ from ml_collections import config_flags
 import numpy as np
 import optax
 from torch.utils.data import DataLoader, Dataset
-import wandb
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH
 from dataset import get_train_val_datasets
 from evaluate import batched_fwd, eval_dataset, print_accuracy_results, top_k_accuracy
-from models import get_conv_model
+from models import get_model
 from state import TrainStateWithBN
+import wandb
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -40,122 +40,6 @@ config_flags.DEFINE_config_file(
     'File path to the training hyperparameter configuration.',
     lock_config=True,
 )
-
-
-# use GPT initializations
-Dense = functools.partial(
-    nn.Dense,
-    kernel_init=nn.initializers.normal(stddev=0.02),
-    bias_init=nn.initializers.zeros,
-)
-
-
-class Block(nn.Module):
-    emb_dim: int
-    block_size: int
-    n_heads: int
-    decoder_mask: jnp.ndarray
-
-    residual_dropout_prob: float
-    attn_dropout_prob: float
-    deterministic: bool
-
-    n_blocks: int = 1  # for residual projection initialization
-
-    def setup(self):
-        self.attention = nn.SelfAttention(
-            num_heads=self.n_heads,
-            dropout_rate=self.attn_dropout_prob,
-            deterministic=self.deterministic,
-        )
-        self.mlp = nn.Sequential(
-            [
-                Dense(4 * self.emb_dim),
-                nn.gelu,
-                nn.Dense(
-                    self.emb_dim,
-                    kernel_init=nn.initializers.normal(
-                        stddev=0.02 / jnp.sqrt(2 * self.n_blocks)
-                    ),
-                    bias_init=nn.initializers.zeros,
-                ),
-                nn.Dropout(
-                    self.residual_dropout_prob, deterministic=self.deterministic
-                ),
-            ]
-        )
-        self.ln1 = nn.LayerNorm()
-        self.ln2 = nn.LayerNorm()
-
-    def __call__(self, x):
-        B, T, _ = x.shape
-        causal_mask = nn.make_causal_mask(jnp.ones((B, T)))
-        x = x + self.attention(x, causal_mask)
-        x = self.ln1(x)
-        x = x + self.mlp(x)
-        x = self.ln2(x)
-        return x
-
-
-class Transformer(nn.Module):
-    token_dim: int
-    emb_dim: int
-
-    n_blocks: int
-    n_heads: int
-    block_size: int
-
-    emb_dropout_prob: float
-    block_dropout_prob: float
-    attn_dropout_prob: float
-    deterministic: bool
-
-    def setup(self):
-        self.token_emb = nn.Embed(
-            num_embeddings=self.token_dim,
-            features=self.emb_dim,
-            embedding_init=nn.initializers.normal(stddev=0.02),
-        )
-        # TODO: try sinusoidal embedding initializer
-        self.pos_embedding = self.param(
-            'pos_embedding',
-            nn.initializers.normal(stddev=1 / jnp.sqrt(self.emb_dim)),
-            (1, self.block_size, self.emb_dim),
-        )
-        self.dropout = nn.Dropout(
-            self.emb_dropout_prob, deterministic=self.deterministic
-        )
-
-        decoder_mask = nn.make_causal_mask(jnp.ones((1, self.block_size)))
-        blocks = [
-            Block(
-                emb_dim=self.emb_dim,
-                block_size=self.block_size,
-                n_heads=self.n_heads,
-                n_blocks=self.n_blocks,  # for residual projection initialization
-                decoder_mask=decoder_mask,
-                attn_dropout_prob=self.attn_dropout_prob,
-                residual_dropout_prob=self.block_dropout_prob,
-                deterministic=self.deterministic,
-            )
-            for _ in range(self.n_blocks)
-        ]
-        self.transformer = nn.Sequential(blocks)
-
-        self.ln = nn.LayerNorm()
-        self.head = Dense(self.token_dim)
-
-    def __call__(self, x):
-        _, t = x.shape
-
-        emb_tokens = self.token_emb(x)
-        emb_pos = self.pos_embedding[:, :t, :]
-        x = emb_tokens + emb_pos
-        x = self.dropout(x)
-        x = self.transformer(x)
-        x = self.ln(x)
-        x = self.head(x)
-        return x
 
 
 def numpy_collate(batch):
@@ -227,13 +111,17 @@ def sample_dataset(ds: Dataset):
     return ds[idx]
 
 
-def train_step(state, inp, label):
+def train_step(state, inp, label, batch_stats):
+
+    fwd_params = {}
+    if batch_stats:
+        fwd_params['batch_stats'] = state.batch_stats
 
     def loss_fn(params):
         logits, updates = state.apply_fn(
-            {'params': params, 'batch_stats': state.batch_stats},
+            {'params': params, **fwd_params},
             inp,
-            mutable=['batch_stats'],
+            mutable=list(fwd_params.keys()),
         )
         chex.assert_equal_shape([logits, label])
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=label))
@@ -242,7 +130,7 @@ def train_step(state, inp, label):
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, (logits, updates)), grads = grad_fn(state.params)
     state = state.apply_gradients(grads=grads)
-    state = state.replace(batch_stats=updates['batch_stats'])
+    state = state.replace(batch_stats=updates['batch_stats']) if batch_stats else state
     return state, (loss, logits)
 
 
@@ -356,10 +244,10 @@ def train(config):
     # setup model and optimizer
     rng, init_rng = jax.random.split(rng)
 
-    model = get_conv_model(config.context_length)
+    model = get_model(config)
     fake_sequence = jnp.ones([1, SEQUENCE_LENGTH + config.context_length, 4], dtype=jnp.int32)
     variables = model.init(init_rng, fake_sequence)
-    params, batch_stats = variables['params'], variables['batch_stats']
+    params, batch_stats = variables['params'], variables.get('batch_stats')
     learning_rate_fn = create_learning_rate_fn(config, len(train_dataset) // config.batch_size)
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_norm_clip),
@@ -378,7 +266,6 @@ def train(config):
         batch_stats=batch_stats,
     )
     ckpt_dir = pathlib.Path(workdir) / 'checkpoints'
-    # state = checkpoints.restore_checkpoint(ckpt_dir, state)
 
     # print model
     rng, tabulate_rng = jax.random.split(rng)
@@ -388,7 +275,7 @@ def train(config):
     # parallelize everything across devices
     state = flax.jax_utils.replicate(state)
     shape_prefix = (world_size, batch_size_per_device)
-    p_train_step = jax.pmap(train_step, axis_name='batch')
+    p_train_step = jax.pmap(train_step, axis_name='batch', static_broadcasted_argnums=3)
     rng = jax.random.split(rng, num=world_size)
 
     step = 0
@@ -404,9 +291,8 @@ def train(config):
 
             fwd_bwd_start = default_timer()
             data_time = fwd_bwd_start - data_start
-            state, (loss, logits) = p_train_step(state, inp, label)
+            state, (loss, logits) = p_train_step(state, inp, label, batch_stats is not None)
             fwd_bwd_time = default_timer() - fwd_bwd_start
-            total_step_time = default_timer() - data_start
 
             examples_seen += np.prod(shape_prefix)
             epoch_frac = examples_seen / len(train_dataset)

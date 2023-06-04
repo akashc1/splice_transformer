@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
 from dataset import H5SpliceDataset, get_test_dataset
-from models import get_conv_model
+from models import get_model
 from state import ModelState, TrainStateWithBN
 
 Fore = colorama.Fore
@@ -110,13 +110,16 @@ def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
     ...
 
 
-def fwd_batch(state, inputs):
+def fwd_batch(state, inputs, batch_stats):
     """
     Forward a single batch with no gradients
     """
+    fwd_params = {'params': state.params}
+    if batch_stats:
+        fwd_params['batch_stats']
 
     logits = state.apply_fn(
-        {'params': state.params, 'batch_stats': state.batch_stats},
+        fwd_params,
         inputs,
     )
 
@@ -127,13 +130,14 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
     """
     Forward a whole chunk of data (e.g. large segment of a chromosome)
     """
-    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
+    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch', static_broadcasted_argnums=2)
 
     world_size = jax.device_count()
     assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
     batch_size_per_device = batch_size // world_size
     shape_prefix = (world_size, batch_size_per_device)
     out = []
+    batch_stats = state.batch_stats is not None
 
     # data parallel full batches
     num_full_batches, num_ragged = divmod(X.shape[0], batch_size)
@@ -141,7 +145,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
         Xb = X[i * batch_size:(i + 1) * batch_size]
         Xb = Xb.reshape(shape_prefix + Xb.shape[1:])
 
-        out_b = p_fwd_fn(state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
+        out_b = p_fwd_fn(state, Xb, batch_stats).reshape((batch_size, SEQUENCE_LENGTH, -1))
         out.append(out_b)
 
     if not num_ragged:
@@ -156,7 +160,9 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
             if ragged_remaining > 0 else X[num_full_batches * batch_size:]
         )
         Xb = Xb.reshape((world_size, ragged_pmap) + X.shape[1:])
-        out_b = p_fwd_fn(state, Xb).reshape((ragged_pmap * world_size, SEQUENCE_LENGTH, -1))
+        out_b = p_fwd_fn(state, Xb, batch_stats).reshape(
+            (ragged_pmap * world_size, SEQUENCE_LENGTH, -1)
+        )
         out.append(out_b)
 
     if not ragged_remaining:
@@ -257,7 +263,7 @@ def test(argv):
     test_ds = get_test_dataset(TEST_DATA_PATH, config.context_length)
 
     # load the different models we're ensembling
-    model = get_conv_model(config.context_length)
+    model = get_model(config)
     model_params = get_models(
         Path(FLAGS.ckpt_cache),
         FLAGS.ckpt_prefix,

@@ -7,11 +7,11 @@ from torch.utils.data import Dataset
 from constants import MAX_CONTEXT_LENGTH
 
 
-def clip_data(x, y, context_length):
+def clip_data(x, context_length):
     clip = (MAX_CONTEXT_LENGTH - context_length) // 2
     if clip != 0:
         x = x[..., clip:-clip, :]
-    return x, y
+    return x
 
 
 class H5SpliceDataset(Dataset):
@@ -50,7 +50,7 @@ class H5SpliceDataset(Dataset):
             chunk_idx = self.indices[idx]
             X = self.h5[f'X{chunk_idx}']
             Y = self.h5[f'Y{chunk_idx}'][0]
-            X, Y = clip_data(X, Y, self.context_length)
+            X = clip_data(X, self.context_length)
             return {'x': X, 'y': Y}
 
         # Relative indices: index of chunk to sample, index within chunk
@@ -65,7 +65,7 @@ class H5SpliceDataset(Dataset):
 
         X = self.h5[f'X{abs_idx}'][rel_idx]
         Y = self.h5[f'Y{abs_idx}'][0, rel_idx]  # Dataset generation code does this, idk why
-        X, Y = clip_data(X, Y, self.context_length)
+        X = clip_data(X, self.context_length)
 
         return {'x': X, 'y': Y}
 

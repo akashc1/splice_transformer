@@ -1,10 +1,11 @@
 import ml_collections
 
-from constants import TRAIN_DATA_PATH
+from constants import TRAIN_DATA_PATH, ModelType
 
 
 def get_config():
     config = ml_collections.ConfigDict()
+    config.n_classes = 3
 
     # random seeds
     config.seed = 42
@@ -27,14 +28,17 @@ def get_config():
 
     # model
     config.context_length = 2000
-    # config.emb_dim = 192
-    # config.n_blocks = 6
-    # config.n_heads = 6
-    # config.block_size = 128
+    config.model_type = ModelType.DILATED_CONV
+    config.deterministic = True
 
-    # config.emb_dropout_prob = 0.1
-    # config.attn_dropout_prob = 0.1
-    # config.block_dropout_prob = 0.1
+    # transformer size
+    config.emb_dim = 64
+    config.n_blocks = 1
+    config.n_heads = 2
+
+    config.emb_dropout_prob = 0.1
+    config.attn_dropout_prob = 0.1
+    config.block_dropout_prob = 0.1
 
     # dataset
     config.data_file = TRAIN_DATA_PATH
