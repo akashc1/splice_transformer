@@ -1,8 +1,9 @@
 from collections import defaultdict
+from torch.utils.data import DataLoader
 import json
 from pathlib import Path
 import sys
-from typing import Callable, List, Union
+from typing import Callable, List, Union, Dict
 
 from absl import app, flags, logging
 import chex
@@ -98,16 +99,14 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4), do_softmax=True):
     return results
 
 
-def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
-    """
-    Correct version of top-k accuracy, at least relative to intuition/interpretation of the paper.
+def update_avg_stats(agg_stats: Dict[str, AverageMeter], new_stats: dict):
+    for k, v in new_stats.items():
+        if k.endswith('num_true'):
+            continue
 
-    In the original source code, top-k accuracy is computed relative to the entire
-    batch_size * sequence_length.
-
-    It is probably a more fair evaluation if this is done on a per-example level.
-    """
-    ...
+        splice_type = k.rsplit('_', 2)[0]
+        n = new_stats[f'{splice_type}_num_true']
+        agg_stats[k].update(v, n=n)
 
 
 def fwd_batch(fwd_params: dict, state: Union[TrainStateWithBN, ModelState], inputs):
@@ -201,13 +200,7 @@ def eval_dataset(ds: H5SpliceDataset, batch_size: int, state: TrainStateWithBN):
 
         logits_chunk = batched_fwd(X_chunk, batch_size, state)
         batch_results = top_k_accuracy(logits_chunk, label_chunk)
-        for k, v in batch_results.items():
-            if k.endswith('num_true'):
-                continue
-
-            splice_type = k.rsplit('_', 2)[0]
-            n = batch_results[f'{splice_type}_num_true']
-            agg_results[k].update(v, n=n)
+        update_avg_stats(agg_results, batch_results)
 
     return jax.tree_map(lambda x: x.avg, agg_results)
 
@@ -256,20 +249,31 @@ def test(argv):
     assert FLAGS.num_models <= 5, f'Expected a maximum of 5 models but got {FLAGS.num_models}!'
 
     world_size = jax.device_count()
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     assert (
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
 
     test_ds = get_test_dataset(TEST_DATA_PATH, config.context_length)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        drop_last=True,
+        shuffle=False,
+    )
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
 
     # load the different models we're ensembling
     model = get_model(config)
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     model_params = get_models(
         Path(FLAGS.ckpt_cache),
         FLAGS.ckpt_prefix,
         model.apply,
         FLAGS.num_models,
     )
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
 
     # measure parameter count before replicating
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(model_params[0]))
@@ -277,26 +281,25 @@ def test(argv):
 
     model_params = [flax.jax_utils.replicate(m) for m in model_params]
 
-    all_probs, all_labels = [], []
-    for i in tqdm(range(len(test_ds)), desc='Running evaluation on test dataset'):
-        batch = test_ds[i]
-        X_chunk, label_chunk = batch['x'], batch['y']
+    agg_results = defaultdict(AverageMeter)
+    for batch in tqdm(test_loader, desc='Running evaluation on test dataset'):
+        X_chunk, label_chunk = batch['x'].numpy(), batch['y'].numpy()
 
         # compute averaged probabilities across all models on this chunk
         m1, *_models = model_params
         probs = jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m1), axis=-1)
         for m in _models:
             probs += jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m), axis=-1)
-
         probs /= len(model_params)
-        all_probs.append(probs)
-        all_labels.append(label_chunk)
 
-    all_probs = jnp.concatenate(all_probs)
-    all_labels = jnp.concatenate(all_labels)
+        # run with chunk results, don't repeat softmax
+        chunk_results = top_k_accuracy(probs, label_chunk, do_softmax=False)
+        update_avg_stats(agg_results, chunk_results)
+        del batch, X_chunk, label_chunk, probs, chunk_results
 
-    test_results = top_k_accuracy(all_probs, all_labels, do_softmax=False)
-    print_accuracy_results(test_results)
+    # reduce to true averages for each value
+    agg_results = jax.tree_map(lambda x: x.avg, agg_results)
+    print_accuracy_results(agg_results)
 
 
 if __name__ == '__main__':
