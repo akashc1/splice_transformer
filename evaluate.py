@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
 from dataset import H5SpliceDataset, get_test_dataset
-from models import get_conv_model
+from models import get_model
 from state import ModelState, TrainStateWithBN
 
 Fore = colorama.Fore
@@ -110,13 +110,12 @@ def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
     ...
 
 
-def fwd_batch(state, inputs):
+def fwd_batch(fwd_params: dict, state: Union[TrainStateWithBN, ModelState], inputs):
     """
     Forward a single batch with no gradients
     """
-
     logits = state.apply_fn(
-        {'params': state.params, 'batch_stats': state.batch_stats},
+        fwd_params,
         inputs,
     )
 
@@ -135,13 +134,17 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
     shape_prefix = (world_size, batch_size_per_device)
     out = []
 
+    fwd_params = {'params': state.params}
+    if state.batch_stats is not None:
+        fwd_params['batch_stats'] = state.batch_stats
+
     # data parallel full batches
     num_full_batches, num_ragged = divmod(X.shape[0], batch_size)
     for i in range(num_full_batches):
         Xb = X[i * batch_size:(i + 1) * batch_size]
         Xb = Xb.reshape(shape_prefix + Xb.shape[1:])
 
-        out_b = p_fwd_fn(state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
+        out_b = p_fwd_fn(fwd_params, state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
         out.append(out_b)
 
     if not num_ragged:
@@ -156,7 +159,9 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
             if ragged_remaining > 0 else X[num_full_batches * batch_size:]
         )
         Xb = Xb.reshape((world_size, ragged_pmap) + X.shape[1:])
-        out_b = p_fwd_fn(state, Xb).reshape((ragged_pmap * world_size, SEQUENCE_LENGTH, -1))
+        out_b = p_fwd_fn(fwd_params, state, Xb).reshape(
+            (ragged_pmap * world_size, SEQUENCE_LENGTH, -1)
+        )
         out.append(out_b)
 
     if not ragged_remaining:
@@ -164,7 +169,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
 
     # final ragged, just one device
     Xb = X[-ragged_remaining:]
-    out_b = fwd_batch(flax.jax_utils.unreplicate(state), Xb)
+    out_b = fwd_batch(flax.jax_utils.unreplicate(fwd_params), flax.jax_utils.unreplicate(state), Xb)
     out.append(out_b)
 
     return jnp.concatenate(out)
@@ -244,6 +249,7 @@ def test(argv):
     config = FLAGS.config
     np.random.seed(config.seed)
 
+    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     assert (
         config.context_length in CONTEXT_LENGTHS
     ), f'{config.context_length=} not permitted, must be one of {CONTEXT_LENGTHS}'
@@ -257,13 +263,18 @@ def test(argv):
     test_ds = get_test_dataset(TEST_DATA_PATH, config.context_length)
 
     # load the different models we're ensembling
-    model = get_conv_model(config.context_length)
+    model = get_model(config)
     model_params = get_models(
         Path(FLAGS.ckpt_cache),
         FLAGS.ckpt_prefix,
         model.apply,
         FLAGS.num_models,
     )
+
+    # measure parameter count before replicating
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(model_params[0]))
+    logging.info(f"Number of model parameters: {num_params:,}")
+
     model_params = [flax.jax_utils.replicate(m) for m in model_params]
 
     all_probs, all_labels = [], []

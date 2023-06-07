@@ -1,6 +1,6 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import flax
 from flax import struct
@@ -23,8 +23,10 @@ class ModelState(struct.PyTreeNode):
     without creating a gradient transformation or optimizer state (as is needed in `TrainState`)
     """
     params: dict = struct.field(pytree_node=True)
-    batch_stats: dict = struct.field(pytree_node=True)
     apply_fn: Callable = struct.field(pytree_node=False)
+
+    # batch stats only used in models that use batchnorm
+    batch_stats: Optional[dict] = struct.field(pytree_node=True, default=None)
 
     @classmethod
     def from_ckpt_dir(cls, ckpt_dir, apply_fn):
@@ -33,4 +35,4 @@ class ModelState(struct.PyTreeNode):
             print(f"Modifying {ckpt_dir=} to {(ckpt_dir := ckpt_dir / 'checkpoints')}")
 
         all_params = checkpoints.restore_checkpoint(ckpt_dir, None)
-        return cls(all_params['params'], all_params['batch_stats'], apply_fn)
+        return cls(all_params['params'], apply_fn, all_params.get('batch_stats'))
