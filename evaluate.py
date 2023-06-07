@@ -110,14 +110,10 @@ def top_k_accuracy_per_example(logits, labels, ks=(0.5, 1, 2, 4)):
     ...
 
 
-def fwd_batch(state, inputs, batch_stats):
+def fwd_batch(fwd_params: dict, state: Union[TrainStateWithBN, ModelState], inputs):
     """
     Forward a single batch with no gradients
     """
-    fwd_params = {'params': state.params}
-    if batch_stats:
-        fwd_params['batch_stats']
-
     logits = state.apply_fn(
         fwd_params,
         inputs,
@@ -130,14 +126,17 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
     """
     Forward a whole chunk of data (e.g. large segment of a chromosome)
     """
-    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch', static_broadcasted_argnums=2)
+    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
 
     world_size = jax.device_count()
     assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
     batch_size_per_device = batch_size // world_size
     shape_prefix = (world_size, batch_size_per_device)
     out = []
-    batch_stats = state.batch_stats is not None
+
+    fwd_params = {'params': state.params}
+    if state.batch_stats is not None:
+        fwd_params['batch_stats'] = state.batch_stats
 
     # data parallel full batches
     num_full_batches, num_ragged = divmod(X.shape[0], batch_size)
@@ -145,7 +144,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
         Xb = X[i * batch_size:(i + 1) * batch_size]
         Xb = Xb.reshape(shape_prefix + Xb.shape[1:])
 
-        out_b = p_fwd_fn(state, Xb, batch_stats).reshape((batch_size, SEQUENCE_LENGTH, -1))
+        out_b = p_fwd_fn(fwd_params, state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
         out.append(out_b)
 
     if not num_ragged:
@@ -160,7 +159,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
             if ragged_remaining > 0 else X[num_full_batches * batch_size:]
         )
         Xb = Xb.reshape((world_size, ragged_pmap) + X.shape[1:])
-        out_b = p_fwd_fn(state, Xb, batch_stats).reshape(
+        out_b = p_fwd_fn(fwd_params, state, Xb).reshape(
             (ragged_pmap * world_size, SEQUENCE_LENGTH, -1)
         )
         out.append(out_b)
@@ -170,7 +169,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
 
     # final ragged, just one device
     Xb = X[-ragged_remaining:]
-    out_b = fwd_batch(flax.jax_utils.unreplicate(state), Xb, batch_stats)
+    out_b = fwd_batch(flax.jax_utils.unreplicate(fwd_params), flax.jax_utils.unreplicate(state), Xb)
     out.append(out_b)
 
     return jnp.concatenate(out)

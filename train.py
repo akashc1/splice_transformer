@@ -1,4 +1,3 @@
-import functools
 import pathlib
 from pathlib import Path
 import random
@@ -9,7 +8,6 @@ from timeit import default_timer
 from absl import app, flags, logging
 import chex
 import colorama
-import distrax
 import flax
 import flax.linen as nn
 from flax.training import checkpoints
@@ -134,74 +132,6 @@ def train_step(state, inp, label, batch_stats):
     return state, (loss, logits)
 
 
-def top_k_logits(logits, k):
-    B, _ = logits.shape
-    topk_idx = jnp.argsort(-logits, axis=-1)[:, :k]
-    rows, _ = jnp.indices((B, k))
-    k_vals = jnp.min(logits[rows, topk_idx], axis=-1)
-    return jnp.where(logits < k_vals[:, None], float('-inf'), logits)
-
-
-def top_p_logits(logits, p):
-    """Nucleus sampling"""
-    B, C = logits.shape
-    sorted_idx = jnp.argsort(-logits, axis=-1)
-    rows, _ = jnp.indices((B, C))
-    sorted_logits = logits[rows, sorted_idx]
-    cdf = jnp.cumsum(nn.softmax(sorted_logits, axis=-1), axis=-1)
-    cutoff_idx = jnp.sum(cdf <= p, axis=-1)
-    cutoff_vals = jnp.min(sorted_logits[rows, cutoff_idx[:, None]], axis=-1)
-    return jnp.where(logits < cutoff_vals[:, None], float('-inf'), logits)
-
-
-@functools.partial(jax.jit, static_argnums=(2, 3, 5, 6, 7))
-def sample(state, prompt, steps, config, rng, temperature=1.0, top_k=None, top_p=0.9):
-    """
-    Autoregressive decoding from the model.
-
-    Args:
-        state: Optimized model parameters.
-        prompt: Encoded sequences of indices to use as the prompt (B, T).
-        steps: Number of tokens to generate.
-        config: Model configuration.
-        rng: random number generator.
-        temperature: Temperature to use for sampling.
-        top_k: Top k logits used for sampling.
-        top_p: Logits masked based on CDF accumulation used for nucleus sampling.
-
-    Returns:
-        A generated sequence of indices of shape (B, T + steps)
-    """
-    assert steps >= 0, 'steps must be >= 0'
-
-    B, prompt_len = prompt.shape
-    prompt = jnp.pad(prompt, ((0, 0), (0, steps)))  # shape (B, prompt_len + steps)
-    block_size = config['block_size']
-
-    def sample_step(i, tokens):
-        window_start = jnp.where(i < block_size, 0, i - block_size)
-        logits = Transformer(**config, deterministic=True).apply(
-            {'params': state.params},
-            jax.lax.dynamic_slice(tokens, (0, window_start), (B, block_size)),
-        )
-
-        # TODO: add <sos> token so we can generate without prompt
-        # to predict the i-th token we must use the logit from the prev position
-        logits = logits[:, jnp.where(i < block_size, i - 1, -1), :] / temperature
-        if top_k is not None:
-            logits = top_k_logits(logits, top_k)
-        if top_p is not None:
-            logits = top_p_logits(logits, top_p)
-
-        sample_rng = jax.random.fold_in(rng, i)
-        next_token_dist = distrax.Categorical(logits=logits)
-        next_token = next_token_dist.sample(seed=sample_rng)
-        return tokens.at[:, i].set(next_token)
-
-    seq = jax.lax.fori_loop(prompt_len, prompt_len + steps, sample_step, prompt)
-    return seq
-
-
 def train(config):
     assert (
         config.context_length in CONTEXT_LENGTHS
@@ -292,6 +222,7 @@ def train(config):
             fwd_bwd_start = default_timer()
             data_time = fwd_bwd_start - data_start
             state, (loss, logits) = p_train_step(state, inp, label, batch_stats is not None)
+            state = jax.block_until_ready(state)
             fwd_bwd_time = default_timer() - fwd_bwd_start
 
             examples_seen += np.prod(shape_prefix)
@@ -376,6 +307,10 @@ def train(config):
         logging.info(f"Epoch time: {default_timer() - e_start:.3f}")
         e_start = default_timer()
 
+    dedup_state = flax.jax_utils.unreplicate(state)
+    checkpoints.save_checkpoint(
+        ckpt_dir, dedup_state, e, keep=float('inf')
+    )
     logging.info(f"Total training time: {default_timer() - start:.3f}")
 
     return state

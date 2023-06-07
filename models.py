@@ -196,6 +196,53 @@ class Transformer(nn.Module):
         return x
 
 
+class Enformer(nn.Module):
+    # meta params
+    context_length: int
+
+    # embedding dimension
+    emb_dim: int
+
+    # convolutional params
+    kernel_sizes: Union[list, np.ndarray]
+    dilations:  Union[list, np.ndarray]
+
+    # transformer params
+    n_blocks: int
+    n_heads: int
+    emb_dropout_prob: float
+    block_dropout_prob: float
+    attn_dropout_prob: float
+    deterministic: bool
+
+    n_classes: int = 3
+
+    @nn.compact
+    def __call__(self, x):
+        conv = nn.Conv(self.emb_dim, (1,), name='init_conv')(x)
+        skip = nn.Conv(self.emb_dim, (1,), name='init_skip')(x)
+
+        for i, (w, d) in enumerate(zip_equal(self.kernel_sizes, self.dilations)):
+            conv = ResidualUnit(self.emb_dim, w, (d,), name=f'residual{i}')(conv)
+
+            if (i + 1) % 4 == 0 or i == len(self.kernel_sizes) - 1:
+                dense = nn.Conv(self.emb_dim, (1,), name=f'dense{i // 4}')(conv)
+                skip = skip + dense
+
+        out = Transformer(
+            self.context_length,
+            self.emb_dim,
+            self.n_blocks,
+            self.n_heads,
+            self.emb_dropout_prob,
+            self.block_dropout_prob,
+            self.attn_dropout_prob,
+            self.deterministic,
+            name='transformer',
+        )(skip)
+        return out
+
+
 def get_conv_model(context_length: int):
     return DilatedConvSplicePredictor(dim=32, **CONV_MODEL_CONFIG[context_length])
 
@@ -207,8 +254,16 @@ def get_bert(config):
     return Transformer(**transformer_kwargs)
 
 
+def get_enformer(config):
+    xformer_fnames = [f.name for f in fields(Transformer) if f.name not in {'parent', 'name'}]
+    xformer_kwargs = {k: getattr(config, k) for k in xformer_fnames}
+    enformer_kwargs = {**xformer_kwargs, **CONV_MODEL_CONFIG[config.conv_setting]}
+    return Enformer(**enformer_kwargs)
+
+
 def get_model(config):
     return {
         ModelType.DILATED_CONV: lambda c: get_conv_model(c.context_length),
         ModelType.BERT: lambda c: get_bert(c),
+        ModelType.ENFORMER: lambda c: get_enformer(c),
     }[config.model_type](config)

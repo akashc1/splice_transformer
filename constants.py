@@ -13,5 +13,4 @@ TEST_DATA_PATH = '/home/akashc/splice/splice_2019/dataset_test_0.h5'
 class ModelType(Enum):
     DILATED_CONV = auto()
     BERT = auto()
-
-
+    ENFORMER = auto()

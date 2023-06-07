@@ -25,7 +25,7 @@ class ModelState(struct.PyTreeNode):
     params: dict = struct.field(pytree_node=True)
     apply_fn: Callable = struct.field(pytree_node=False)
 
-    # batch stats only used in models that ues batchnorm
+    # batch stats only used in models that use batchnorm
     batch_stats: Optional[dict] = struct.field(pytree_node=True, default=None)
 
     @classmethod
