@@ -153,7 +153,7 @@ class DownProjectBlock(Block):
     def setup(self):
         super().setup()
 
-        self.attention = nn.MultiHeadDotProductAttention(
+        self.cross_attention = nn.MultiHeadDotProductAttention(
             num_heads=self.n_heads,
             dropout_rate=self.attn_dropout_prob,
             deterministic=self.deterministic,
@@ -167,7 +167,7 @@ class DownProjectBlock(Block):
         # query is center block of length proj_length
         trunc_length = T - self.proj_length
         xq = x[:, trunc_length // 2:-trunc_length // 2]
-        x = x + self.attention(inputs_q=xq, inputs_kv=x, deterministic=self.deterministic)
+        x = xq + self.cross_attention(inputs_q=xq, inputs_kv=x)
 
         x = self.ln1(x)
         x = x + self.mlp(x)
