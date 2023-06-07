@@ -147,6 +147,34 @@ class Block(nn.Module):
         return x
 
 
+class DownProjectBlock(Block):
+    proj_length: int = SEQUENCE_LENGTH
+
+    def setup(self):
+        super().setup()
+
+        self.attention = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            dropout_rate=self.attn_dropout_prob,
+            deterministic=self.deterministic,
+            param_dtype=jnp.bfloat16,
+        )
+
+    def __call__(self, x):
+        B, T = x.shape[:2]
+        x = x.astype(jnp.bfloat16)
+
+        # query is center block of length proj_length
+        trunc_length = T - self.proj_length
+        xq = x[:, trunc_length // 2:-trunc_length // 2]
+        x = x + self.attention(inputs_q=xq, inputs_kv=x, deterministic=self.deterministic)
+
+        x = self.ln1(x)
+        x = x + self.mlp(x)
+        x = self.ln2(x)
+        return x
+
+
 class Transformer(nn.Module):
     context_length: int
 
@@ -159,6 +187,8 @@ class Transformer(nn.Module):
     block_dropout_prob: float
     attn_dropout_prob: float
     deterministic: bool
+
+    perceiver: bool = False
 
     n_classes: int = 3
 
@@ -174,17 +204,21 @@ class Transformer(nn.Module):
             self.emb_dropout_prob, deterministic=self.deterministic
         )
 
-        blocks = [
-            Block(
-                emb_dim=self.emb_dim,
-                n_heads=self.n_heads,
-                n_blocks=self.n_blocks,  # for residual projection initialization
-                attn_dropout_prob=self.attn_dropout_prob,
-                residual_dropout_prob=self.block_dropout_prob,
-                deterministic=self.deterministic,
-            )
-            for _ in range(self.n_blocks)
-        ]
+        blocks = []
+        block_params = dict(
+            emb_dim=self.emb_dim,
+            n_heads=self.n_heads,
+            n_blocks=self.n_blocks,  # for residual projection initialization
+            attn_dropout_prob=self.attn_dropout_prob,
+            residual_dropout_prob=self.block_dropout_prob,
+            deterministic=self.deterministic,
+        )
+        if self.perceiver:
+            block_params['proj_length'] = SEQUENCE_LENGTH
+            blocks.append(DownProjectBlock(**block_params))
+        else:
+            blocks.append(Block(**block_params))
+        blocks.extend(Block(**block_params) for _ in range(self.n_blocks - 1))
         self.transformer = nn.Sequential(blocks)
 
         self.ln = nn.LayerNorm(param_dtype=jnp.bfloat16)
@@ -199,7 +233,11 @@ class Transformer(nn.Module):
         x = emb_tokens + emb_pos
         x = self.dropout(x)
         x = self.transformer(x)
-        x = x[:, self.context_length // 2:-self.context_length // 2]
+
+        # perceiver squashes to SEQUENCE_LENGTH
+        if not self.perceiver:
+            x = x[:, self.context_length // 2:-self.context_length // 2]
+
         x = self.ln(x)
         x = self.head(x)
         return x
@@ -223,6 +261,8 @@ class Enformer(nn.Module):
     block_dropout_prob: float
     attn_dropout_prob: float
     deterministic: bool
+
+    perceiver: bool = False
 
     n_classes: int = 3
 
@@ -253,6 +293,7 @@ class Enformer(nn.Module):
             self.block_dropout_prob,
             self.attn_dropout_prob,
             self.deterministic,
+            perceiver=self.perceiver,
             name='transformer',
         )(skip)
         return out

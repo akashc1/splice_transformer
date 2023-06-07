@@ -5,5 +5,6 @@ from constants import ModelType
 def get_config():
     config = base_config.get_config()
     config.model_type = ModelType.BERT
+    config.perceiver = False
 
     return config
