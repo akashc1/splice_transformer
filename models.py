@@ -48,12 +48,12 @@ class ResidualUnit(nn.Module):
 
     def setup(self):
         self.net = nn.Sequential([
+            nn.BatchNorm(use_running_average=True, param_dtype=jnp.bfloat16),
+            nn.relu,
+            nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation, param_dtype=jnp.bfloat16),
             nn.BatchNorm(use_running_average=True),
             nn.relu,
-            nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation),
-            nn.BatchNorm(use_running_average=True),
-            nn.relu,
-            nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation),
+            nn.Conv(self.dim, (self.k,), kernel_dilation=self.dilation, param_dtype=jnp.bfloat16),
             nn.relu,
         ])
 
@@ -73,25 +73,30 @@ class DilatedConvSplicePredictor(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        conv = nn.Conv(self.dim, (1,), name='init_conv')(x)
-        skip = nn.Conv(self.dim, (1,), name='init_skip')(x)
+        conv = nn.Conv(self.dim, (1,), param_dtype=jnp.bfloat16, name='init_conv')(x)
+        skip = nn.Conv(self.dim, (1,), param_dtype=jnp.bfloat16, name='init_skip')(x)
 
         for i, (w, d) in enumerate(zip_equal(self.kernel_sizes, self.dilations)):
             conv = ResidualUnit(self.dim, w, (d,), name=f'residual{i}')(conv)
 
             if (i + 1) % 4 == 0 or i == len(self.kernel_sizes) - 1:
-                dense = nn.Conv(self.dim, (1,), name=f'dense{i // 4}')(conv)
+                dense = nn.Conv(
+                    self.dim,
+                    (1,),
+                    param_dtype=jnp.bfloat16,
+                    name=f'dense{i // 4}')(conv)
                 skip = skip + dense
 
         skip = skip[:, self.context_length // 2:-(self.context_length // 2), ...]
-        return nn.Conv(3, (1,), name='cls_final')(skip)
+        return nn.Conv(3, (1,), name='cls_final', param_dtype=jnp.bfloat16)(skip)
 
 
 # use GPT initializations
 Dense = functools.partial(
     nn.Dense,
-    kernel_init=nn.initializers.normal(stddev=0.02),
+    kernel_init=nn.initializers.normal(stddev=0.02, dtype=jnp.bfloat16),
     bias_init=nn.initializers.zeros,
+    param_dtype=jnp.bfloat16,
 )
 
 
@@ -110,6 +115,7 @@ class Block(nn.Module):
             num_heads=self.n_heads,
             dropout_rate=self.attn_dropout_prob,
             deterministic=self.deterministic,
+            param_dtype=jnp.bfloat16,
         )
         self.mlp = nn.Sequential(
             [
@@ -118,7 +124,8 @@ class Block(nn.Module):
                 nn.Dense(
                     self.emb_dim,
                     kernel_init=nn.initializers.normal(
-                        stddev=0.02 / jnp.sqrt(2 * self.n_blocks)
+                        stddev=0.02 / jnp.sqrt(2 * self.n_blocks),
+                        dtype=jnp.bfloat16,
                     ),
                     bias_init=nn.initializers.zeros,
                 ),
@@ -127,12 +134,41 @@ class Block(nn.Module):
                 ),
             ]
         )
-        self.ln1 = nn.LayerNorm()
-        self.ln2 = nn.LayerNorm()
+        self.ln1 = nn.LayerNorm(param_dtype=jnp.bfloat16)
+        self.ln2 = nn.LayerNorm(param_dtype=jnp.bfloat16)
 
     def __call__(self, x):
         B, T, _ = x.shape
+        x = x.astype(jnp.bfloat16)
         x = x + self.attention(x)
+        x = self.ln1(x)
+        x = x + self.mlp(x)
+        x = self.ln2(x)
+        return x
+
+
+class DownProjectBlock(Block):
+    proj_length: int = SEQUENCE_LENGTH
+
+    def setup(self):
+        super().setup()
+
+        self.cross_attention = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            dropout_rate=self.attn_dropout_prob,
+            deterministic=self.deterministic,
+            param_dtype=jnp.bfloat16,
+        )
+
+    def __call__(self, x):
+        B, T = x.shape[:2]
+        x = x.astype(jnp.bfloat16)
+
+        # query is center block of length proj_length
+        trunc_length = T - self.proj_length
+        xq = x[:, trunc_length // 2:-trunc_length // 2]
+        x = xq + self.cross_attention(inputs_q=xq, inputs_kv=x)
+
         x = self.ln1(x)
         x = x + self.mlp(x)
         x = self.ln2(x)
@@ -152,6 +188,8 @@ class Transformer(nn.Module):
     attn_dropout_prob: float
     deterministic: bool
 
+    perceiver: bool = False
+
     n_classes: int = 3
 
     def setup(self):
@@ -159,38 +197,47 @@ class Transformer(nn.Module):
         # TODO: try sinusoidal embedding initializer
         self.pos_embedding = self.param(
             'pos_embedding',
-            nn.initializers.normal(stddev=1 / jnp.sqrt(self.emb_dim)),
+            nn.initializers.normal(stddev=1 / jnp.sqrt(self.emb_dim), dtype=jnp.bfloat16),
             (1, self.context_length + SEQUENCE_LENGTH, self.emb_dim),
         )
         self.dropout = nn.Dropout(
             self.emb_dropout_prob, deterministic=self.deterministic
         )
 
-        blocks = [
-            Block(
-                emb_dim=self.emb_dim,
-                n_heads=self.n_heads,
-                n_blocks=self.n_blocks,  # for residual projection initialization
-                attn_dropout_prob=self.attn_dropout_prob,
-                residual_dropout_prob=self.block_dropout_prob,
-                deterministic=self.deterministic,
-            )
-            for _ in range(self.n_blocks)
-        ]
+        blocks = []
+        block_params = dict(
+            emb_dim=self.emb_dim,
+            n_heads=self.n_heads,
+            n_blocks=self.n_blocks,  # for residual projection initialization
+            attn_dropout_prob=self.attn_dropout_prob,
+            residual_dropout_prob=self.block_dropout_prob,
+            deterministic=self.deterministic,
+        )
+        if self.perceiver:
+            block_params['proj_length'] = SEQUENCE_LENGTH
+            blocks.append(DownProjectBlock(**block_params))
+        else:
+            blocks.append(Block(**block_params))
+        blocks.extend(Block(**block_params) for _ in range(self.n_blocks - 1))
         self.transformer = nn.Sequential(blocks)
 
-        self.ln = nn.LayerNorm()
+        self.ln = nn.LayerNorm(param_dtype=jnp.bfloat16)
         self.head = Dense(self.n_classes)
 
     def __call__(self, x):
         t = x.shape[1]  # (B, SEQUENCE_LENGTH + CONTEXT_LENGTH, C)
 
+        x = x.astype(jnp.bfloat16)
         emb_tokens = self.token_emb(x)
         emb_pos = self.pos_embedding[:, :t, :]
         x = emb_tokens + emb_pos
         x = self.dropout(x)
         x = self.transformer(x)
-        x = x[:, self.context_length // 2:-self.context_length // 2]
+
+        # perceiver squashes to SEQUENCE_LENGTH
+        if not self.perceiver:
+            x = x[:, self.context_length // 2:-self.context_length // 2]
+
         x = self.ln(x)
         x = self.head(x)
         return x
@@ -215,18 +262,26 @@ class Enformer(nn.Module):
     attn_dropout_prob: float
     deterministic: bool
 
+    perceiver: bool = False
+
     n_classes: int = 3
 
     @nn.compact
     def __call__(self, x):
-        conv = nn.Conv(self.emb_dim, (1,), name='init_conv')(x)
-        skip = nn.Conv(self.emb_dim, (1,), name='init_skip')(x)
+        x = x.astype(jnp.bfloat16)
+        conv = nn.Conv(self.emb_dim, (1,), name='init_conv', param_dtype=jnp.bfloat16)(x)
+        skip = nn.Conv(self.emb_dim, (1,), name='init_skip', param_dtype=jnp.bfloat16)(x)
 
         for i, (w, d) in enumerate(zip_equal(self.kernel_sizes, self.dilations)):
             conv = ResidualUnit(self.emb_dim, w, (d,), name=f'residual{i}')(conv)
 
             if (i + 1) % 4 == 0 or i == len(self.kernel_sizes) - 1:
-                dense = nn.Conv(self.emb_dim, (1,), name=f'dense{i // 4}')(conv)
+                dense = nn.Conv(
+                    self.emb_dim,
+                    (1,),
+                    name=f'dense{i // 4}',
+                    param_dtype=jnp.bfloat16,
+                )(conv)
                 skip = skip + dense
 
         out = Transformer(
@@ -238,6 +293,7 @@ class Enformer(nn.Module):
             self.block_dropout_prob,
             self.attn_dropout_prob,
             self.deterministic,
+            perceiver=self.perceiver,
             name='transformer',
         )(skip)
         return out
