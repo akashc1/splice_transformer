@@ -92,4 +92,4 @@ def get_test_dataset(h5_path, context_length):
         num_chunks = len(f.keys()) // 2
 
     idx = list(range(num_chunks))
-    return H5SpliceDataset(h5_path, idx, context_length, load_chunks=True)
+    return H5SpliceDataset(h5_path, idx, context_length, load_chunks=False)

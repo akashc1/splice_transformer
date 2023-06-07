@@ -34,5 +34,5 @@ class ModelState(struct.PyTreeNode):
         if not ckpt_dir.name == 'checkpoints':
             print(f"Modifying {ckpt_dir=} to {(ckpt_dir := ckpt_dir / 'checkpoints')}")
 
-        all_params = checkpoints.restore_checkpoint(ckpt_dir, None)
+        all_params = checkpoints.restore_checkpoint(ckpt_dir, None, parallel=False)
         return cls(all_params['params'], apply_fn, all_params.get('batch_stats'))
