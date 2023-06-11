@@ -54,17 +54,12 @@ def top_k_accuracy(logits, labels, ks=(0.5, 1, 2, 4), do_softmax=True):
     assert logits.ndim == 3, f'Expect 3D logits (B, T, C), but got {logits.shape}'
     assert labels.ndim == 3, f'Expect 3D labels (B, T, C), but got {labels.shape}'
 
-    # remove examples which have no splice sites
-    has_expr = labels[:, :, 1:].sum((1, 2)) > 0
-    logits, labels = logits[has_expr], labels[has_expr]
-
     B, T, C = logits.shape
     logits, labels = logits.reshape(B * T, C), labels.reshape(B * T, C)
 
-    boundary_mask = labels[:, 1:].sum(1) > 0  # either splice acceptor or donor
     probs = jax.nn.softmax(logits, axis=-1) if do_softmax else logits
-    acceptor_probs, donor_probs = probs[boundary_mask, 1], probs[boundary_mask, 2]
-    acceptor_labels, donor_labels = labels[boundary_mask, 1], labels[boundary_mask, 2]
+    acceptor_probs, donor_probs = probs[:, 1], probs[:, 2]
+    acceptor_labels, donor_labels = labels[:, 1], labels[:, 2]
 
     results = {}
     for name, (p, l) in zip(
@@ -249,6 +244,7 @@ def test(argv):
     assert FLAGS.num_models <= 5, f'Expected a maximum of 5 models but got {FLAGS.num_models}!'
 
     world_size = jax.device_count()
+    logging.info("Verified num_models")
     logging.info(f"Running evaluation on test set with context length {config.context_length}")
     assert (
         config.batch_size % world_size == 0
