@@ -1,3 +1,4 @@
+import jax
 from collections import defaultdict
 from torch.utils.data import DataLoader
 import json
@@ -9,7 +10,6 @@ from absl import app, flags, logging
 import chex
 import colorama
 import flax
-import jax
 from jax import numpy as jnp
 from ml_collections import config_flags
 import numpy as np
@@ -20,6 +20,7 @@ from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
 from dataset import H5SpliceDataset, get_test_dataset
 from models import get_model
 from state import ModelState, TrainStateWithBN
+print(f"{jax.device_count()=}")
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -299,6 +300,7 @@ def test(argv):
 
 
 if __name__ == '__main__':
+    print(f"{jax.device_count()=}")
     print(f"Cmd: `python {' '.join(sys.argv)}`")
 
     FLAGS = flags.FLAGS
