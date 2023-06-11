@@ -1,26 +1,24 @@
-import jax
 from collections import defaultdict
-from torch.utils.data import DataLoader
 import json
 from pathlib import Path
 import sys
-from typing import Callable, List, Union, Dict
+from typing import Callable, Dict, List, Union
 
 from absl import app, flags, logging
 import chex
 import colorama
 import flax
+import jax
 from jax import numpy as jnp
 from ml_collections import config_flags
 import numpy as np
 from sklearn.metrics import average_precision_score
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from constants import CONTEXT_LENGTHS, SEQUENCE_LENGTH, TEST_DATA_PATH
 from dataset import H5SpliceDataset, get_test_dataset
 from models import get_model
-from state import ModelState, TrainStateWithBN
-print(f"{jax.device_count()=}")
 
 Fore = colorama.Fore
 Style = colorama.Style
@@ -105,7 +103,7 @@ def update_avg_stats(agg_stats: Dict[str, AverageMeter], new_stats: dict):
         agg_stats[k].update(v, n=n)
 
 
-def fwd_batch(fwd_params: dict, state: Union[TrainStateWithBN, ModelState], inputs):
+def fwd_batch(fwd_params, state, inputs):
     """
     Forward a single batch with no gradients
     """
@@ -117,7 +115,7 @@ def fwd_batch(fwd_params: dict, state: Union[TrainStateWithBN, ModelState], inpu
     return logits
 
 
-def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
+def batched_fwd(X, batch_size: int, state):
     """
     Forward a whole chunk of data (e.g. large segment of a chromosome)
     """
@@ -170,7 +168,7 @@ def batched_fwd(X, batch_size: int, state: Union[TrainStateWithBN, ModelState]):
     return jnp.concatenate(out)
 
 
-def eval_dataset(ds: H5SpliceDataset, batch_size: int, state: TrainStateWithBN):
+def eval_dataset(ds: H5SpliceDataset, batch_size: int, state):
     """
     Run evaluation on all examples in a dataloader, parallelized across devices.
 
@@ -223,7 +221,8 @@ def get_models(
     ckpt_prefix: str,
     apply_fn: Callable,
     num_models: int = 5,
-) -> List[ModelState]:
+):
+    from state import ModelState
     dirs = sorted(basedir.glob(f'{ckpt_prefix}*'))[:num_models]
     assert (
         len(dirs) == num_models
