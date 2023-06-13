@@ -2,7 +2,7 @@ from collections import defaultdict
 import json
 from pathlib import Path
 import sys
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List
 
 from absl import app, flags, logging
 import chex
@@ -11,6 +11,7 @@ import flax
 import jax
 from jax import numpy as jnp
 from ml_collections import config_flags
+from more_itertools import one
 import numpy as np
 from sklearn.metrics import average_precision_score
 from torch.utils.data import DataLoader
@@ -119,7 +120,7 @@ def batched_fwd(X, batch_size: int, state):
     """
     Forward a whole chunk of data (e.g. large segment of a chromosome)
     """
-    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch')
+    p_fwd_fn = jax.pmap(fwd_batch, axis_name='batch', donate_argnums=2)
 
     world_size = jax.device_count()
     assert batch_size % world_size == 0, f"{batch_size=} must be divisible by {world_size=}"
@@ -138,10 +139,10 @@ def batched_fwd(X, batch_size: int, state):
         Xb = Xb.reshape(shape_prefix + Xb.shape[1:])
 
         out_b = p_fwd_fn(fwd_params, state, Xb).reshape((batch_size, SEQUENCE_LENGTH, -1))
-        out.append(out_b)
+        out.append(np.array(out_b))
 
     if not num_ragged:
-        return jnp.concatenate(out)
+        return np.concatenate(out)
 
     # data parallel ragged
     ragged_pmap, ragged_remaining = divmod(num_ragged, world_size)
@@ -155,17 +156,17 @@ def batched_fwd(X, batch_size: int, state):
         out_b = p_fwd_fn(fwd_params, state, Xb).reshape(
             (ragged_pmap * world_size, SEQUENCE_LENGTH, -1)
         )
-        out.append(out_b)
+        out.append(np.array(out_b))
 
     if not ragged_remaining:
-        return jnp.concatenate(out)
+        return np.concatenate(out)
 
     # final ragged, just one device
     Xb = X[-ragged_remaining:]
     out_b = fwd_batch(flax.jax_utils.unreplicate(fwd_params), flax.jax_utils.unreplicate(state), Xb)
-    out.append(out_b)
+    out.append(np.array(out_b))
 
-    return jnp.concatenate(out)
+    return np.concatenate(out)
 
 
 def eval_dataset(ds: H5SpliceDataset, batch_size: int, state):
@@ -244,8 +245,6 @@ def test(argv):
     assert FLAGS.num_models <= 5, f'Expected a maximum of 5 models but got {FLAGS.num_models}!'
 
     world_size = jax.device_count()
-    logging.info("Verified num_models")
-    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     assert (
         config.batch_size % world_size == 0
     ), f"{config.batch_size} must be divisible by {world_size=}"
@@ -253,48 +252,44 @@ def test(argv):
     test_ds = get_test_dataset(TEST_DATA_PATH, config.context_length)
     test_loader = DataLoader(
         test_ds,
-        batch_size=config.batch_size,
+        batch_size=config.batch_size if config.context_length == 10000 else 1,
         num_workers=config.num_workers,
         drop_last=True,
         shuffle=False,
     )
-    logging.info(f"Running evaluation on test set with context length {config.context_length}")
 
     # load the different models we're ensembling
     model = get_model(config)
-    logging.info(f"Running evaluation on test set with context length {config.context_length}")
     model_params = get_models(
         Path(FLAGS.ckpt_cache),
         FLAGS.ckpt_prefix,
         model.apply,
         FLAGS.num_models,
     )
-    logging.info(f"Running evaluation on test set with context length {config.context_length}")
+    model_params = one(model_params)
 
     # measure parameter count before replicating
-    num_params = sum(x.size for x in jax.tree_util.tree_leaves(model_params[0]))
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(model_params))
     logging.info(f"Number of model parameters: {num_params:,}")
 
-    model_params = [flax.jax_utils.replicate(m) for m in model_params]
+    model_params = flax.jax_utils.replicate(model_params)
 
     agg_results = defaultdict(AverageMeter)
     for batch in tqdm(test_loader, desc='Running evaluation on test dataset'):
         X_chunk, label_chunk = batch['x'].numpy(), batch['y'].numpy()
+        if config.context_length < 10000:
+            X_chunk, label_chunk = X_chunk.squeeze(), label_chunk.squeeze()
 
-        # compute averaged probabilities across all models on this chunk
-        m1, *_models = model_params
-        probs = jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m1), axis=-1)
-        for m in _models:
-            probs += jax.nn.softmax(batched_fwd(X_chunk, config.batch_size, m), axis=-1)
-        probs /= len(model_params)
+        logits = batched_fwd(X_chunk, config.batch_size, model_params)
 
         # run with chunk results, don't repeat softmax
-        chunk_results = top_k_accuracy(probs, label_chunk, do_softmax=False)
+        chunk_results = top_k_accuracy(logits, label_chunk)
         update_avg_stats(agg_results, chunk_results)
-        del batch, X_chunk, label_chunk, probs, chunk_results
+        del batch, X_chunk, label_chunk, logits, chunk_results
 
     # reduce to true averages for each value
     agg_results = jax.tree_map(lambda x: x.avg, agg_results)
+
     print_accuracy_results(agg_results)
 
 
