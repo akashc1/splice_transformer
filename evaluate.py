@@ -308,9 +308,8 @@ if __name__ == '__main__':
     )
     flags.DEFINE_integer(
         'num_models',
-        None,
+        1,
         'Number of models matching template to use',
-        required=True,
     )
     config_flags.DEFINE_config_file(
         'config',
