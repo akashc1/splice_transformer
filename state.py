@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-import flax
 from flax import struct
 from flax.core import frozen_dict
 from flax.training import checkpoints, train_state

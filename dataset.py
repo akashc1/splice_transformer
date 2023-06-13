@@ -48,7 +48,7 @@ class H5SpliceDataset(Dataset):
         # Return example of whole chunk
         if self.load_chunks:
             chunk_idx = self.indices[idx]
-            X = self.h5[f'X{chunk_idx}']
+            X = self.h5[f'X{chunk_idx}'][:]
             Y = self.h5[f'Y{chunk_idx}'][0]
             X = clip_data(X, self.context_length)
             return {'x': X, 'y': Y}
@@ -92,4 +92,4 @@ def get_test_dataset(h5_path, context_length):
         num_chunks = len(f.keys()) // 2
 
     idx = list(range(num_chunks))
-    return H5SpliceDataset(h5_path, idx, context_length, load_chunks=False)
+    return H5SpliceDataset(h5_path, idx, context_length, load_chunks=context_length != 10000)
